@@ -197,6 +197,7 @@
                 <version>2.7</version>
                 <configuration>
                     <skipTests>true</skipTests>
+                    <printSummary>true</printSummary>
                 </configuration>
             </plugin>
 
