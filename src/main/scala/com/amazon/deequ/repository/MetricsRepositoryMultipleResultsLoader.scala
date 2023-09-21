@@ -99,8 +99,8 @@ private[repository] object MetricsRepositoryMultipleResultsLoader {
 
   def jsonUnion(jsonOne: String, jsonTwo: String): String = {
 
-    val objectOne: Seq[Map[String, Any]] = SimpleResultSerde.deserialize(jsonOne).toSeq
-    val objectTwo: Seq[Map[String, Any]] = SimpleResultSerde.deserialize(jsonTwo).toSeq
+    val objectOne: Seq[Map[String, Any]] = SimpleResultSerde.deserialize(jsonOne)
+    val objectTwo: Seq[Map[String, Any]] = SimpleResultSerde.deserialize(jsonTwo)
 
     val columnsTotal = objectOne.headOption.getOrElse(Map.empty).keySet ++
       objectTwo.headOption.getOrElse(Map.empty).keySet

@@ -124,19 +124,13 @@ object AnalyzerContext {
     }
   }
 
-  // when using private, leads to
-  // No applicable constructor/method
-  // private[this]
-  case class SimpleMetricOutput(
+  private[this] case class SimpleMetricOutput(
     entity: String,
     instance: String,
     name: String,
     value: Double)
 
-  // when using private, leads to
-  // No applicable constructor/method
-  //  private[this]
-  object SimpleMetricOutput {
+  private[this] object SimpleMetricOutput {
 
     def apply(doubleMetric: DoubleMetric): SimpleMetricOutput = {
       SimpleMetricOutput(

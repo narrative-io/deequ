@@ -79,13 +79,12 @@ class VerificationResultTest extends WordSpec with Matchers with SparkContextSpe
           val successMetricsResultsJson = VerificationResult.successMetricsAsJson(results)
 
           val expectedJson =
-            """[
-              |{"entity":"Multicolumn","instance":"att1,att2","name":"Uniqueness","value":0.25},
-              {"entity":"Column","instance":"item","name":"Distinctness","value":1.0},
+            """[{"entity":"Column","instance":"item","name":"Distinctness","value":1.0},
               |{"entity": "Column", "instance":"att2","name":"Completeness","value":1.0},
-              |{"entity":"Dataset","instance":"*","name":"Size","value":4.0},
-              |{"entity":"Column","instance":"att1","name":"Completeness","value":1.0}
-              |]"""
+              |{"entity":"Column","instance":"att1","name":"Completeness","value":1.0},
+              |{"entity":"Multicolumn","instance":"att1,att2",
+              |"name":"Uniqueness","value":0.25},
+              |{"entity":"Dataset","instance":"*","name":"Size","value":4.0}]"""
               .stripMargin.replaceAll("\n", "")
 
           assertSameResultsJson(successMetricsResultsJson, expectedJson)
@@ -103,10 +102,9 @@ class VerificationResultTest extends WordSpec with Matchers with SparkContextSpe
             VerificationResult.successMetricsAsJson(results, metricsForAnalyzers)
 
           val expectedJson =
-            """[
-              |{"entity":"Multicolumn","instance":"att1,att2","name":"Uniqueness","value":0.25},
-              |{"entity":"Column","instance":"att1","name":"Completeness","value":1.0}
-              |]"""
+            """[{"entity":"Column","instance":"att1","name":"Completeness","value":1.0},
+              |{"entity":"Multicolumn","instance":"att1,att2",
+              |"name":"Uniqueness","value":0.25}]"""
               .stripMargin.replaceAll("\n", "")
 
            assertSameResultsJson(successMetricsResultsJson, expectedJson)

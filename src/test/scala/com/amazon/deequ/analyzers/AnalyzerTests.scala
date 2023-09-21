@@ -17,7 +17,6 @@
 package com.amazon.deequ
 package analyzers
 
-import com.amazon.deequ
 import com.amazon.deequ.analyzers.runners.NoSuchColumnException
 import com.amazon.deequ.metrics.Distribution
 import com.amazon.deequ.metrics.DistributionValue
@@ -350,7 +349,6 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
       val dataTypes = DataTypeInstances.values.map { _.toString }
 
       val zeros = dataTypes
-        .unsorted
         .diff { nonZeroValuesWithStringKeys.map { case (distKey, _) => distKey }.toSet }
         .map(dataType => dataType -> DistributionValue(0, 0.0))
         .toSeq
@@ -363,33 +361,33 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
     "fail for non-atomic columns" in withSparkSession { sparkSession =>
       val df = getDfWithNestedColumn(sparkSession)
 
-      assert(deequ.analyzers.DataType("source").calculate(df).value.isFailure)
+      assert(DataType("source").calculate(df).value.isFailure)
     }
 
     "fall back to String in case no known data type matched" in withSparkSession { sparkSession =>
       val df = getDfFull(sparkSession)
 
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe
+      DataType("att1").calculate(df).value shouldBe
         Success(distributionFrom(DataTypeInstances.String -> DistributionValue(4, 1.0)))
     }
 
     "detect integral type correctly" in withSparkSession { sparkSession =>
       val df = getDfWithNumericValues(sparkSession)
       val expectedResult = distributionFrom(DataTypeInstances.Integral -> DistributionValue(6, 1.0))
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect integral type correctly for negative numbers" in withSparkSession { sparkSession =>
       val df = getDfWithNegativeNumbers(sparkSession)
       val expectedResult = distributionFrom(DataTypeInstances.Integral -> DistributionValue(4, 1.0))
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect fractional type correctly for negative numbers" in withSparkSession { sparkSession =>
       val df = getDfWithNegativeNumbers(sparkSession)
       val expectedResult =
         distributionFrom(DataTypeInstances.Fractional -> DistributionValue(4, 1.0))
-      deequ.analyzers.DataType("att2").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att2").calculate(df).value shouldBe Success(expectedResult)
     }
 
 
@@ -398,14 +396,14 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
         .withColumn("att1_float", col("att1").cast(FloatType))
       val expectedResult =
         distributionFrom(DataTypeInstances.Fractional -> DistributionValue(6, 1.0))
-        deequ.analyzers.DataType("att1_float").calculate(df).value shouldBe Success(expectedResult)
+        DataType("att1_float").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect integral type in string column" in withSparkSession { sparkSession =>
       val df = getDfWithNumericValues(sparkSession)
         .withColumn("att1_str", col("att1").cast(StringType))
       val expectedResult = distributionFrom(DataTypeInstances.Integral -> DistributionValue(6, 1.0))
-      deequ.analyzers.DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect fractional type in string column" in withSparkSession { sparkSession =>
@@ -414,19 +412,19 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
       val expectedResult =
         distributionFrom(DataTypeInstances.Fractional -> DistributionValue(6, 1.0))
-      deequ.analyzers.DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "fall back to string in case the string column didn't match " +
       " any known other data type" in withSparkSession { sparkSession =>
       val df = getDfFull(sparkSession)
       val expectedResult = distributionFrom(DataTypeInstances.String -> DistributionValue(4, 1.0))
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect fractional for mixed fractional and integral" in withSparkSession { sparkSession =>
       val df = getDfFractionalIntegralTypes(sparkSession)
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Fractional -> DistributionValue(1, 0.5),
           DataTypeInstances.Integral -> DistributionValue(1, 0.5)
@@ -436,7 +434,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
     "fall back to string for mixed fractional and string" in withSparkSession { sparkSession =>
       val df = getDfFractionalStringTypes(sparkSession)
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Fractional -> DistributionValue(1, 0.5),
           DataTypeInstances.String -> DistributionValue(1, 0.5)
@@ -446,7 +444,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
     "fall back to string for mixed integral and string" in withSparkSession { sparkSession =>
       val df = getDfIntegralStringTypes(sparkSession)
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Integral -> DistributionValue(1, 0.5),
           DataTypeInstances.String -> DistributionValue(1, 0.5)
@@ -456,7 +454,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
     "integral for numeric and null" in withSparkSession { sparkSession =>
       val df = getDfWithUniqueColumns(sparkSession)
-      deequ.analyzers.DataType("uniqueWithNulls").calculate(df).value shouldBe Success(
+      DataType("uniqueWithNulls").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Unknown -> DistributionValue(1, 1.0/6.0),
           DataTypeInstances.Integral -> DistributionValue(5, 5.0/6.0)
@@ -473,7 +471,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
       val expectedResult = distributionFrom(DataTypeInstances.Boolean -> DistributionValue(2, 1.0))
 
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "fall back to string for boolean and null" in withSparkSession { sparkSession =>
@@ -485,7 +483,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
         ("4", "2.0")
       ).toDF("item", "att1")
 
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Fractional -> DistributionValue(1, 0.25),
           DataTypeInstances.Unknown -> DistributionValue(1, 0.25),

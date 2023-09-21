@@ -116,12 +116,12 @@ case class OnlineNormalStrategy(
         ret += OnlineCalculationResult(currentMean, stdDev, isAnomaly = true)
       }
     }
-    ret.toSeq
+    ret
   }
 
 
   /**
-    * Search for anomalies in a series of datag points.
+    * Search for anomalies in a series of data points.
     *
     * @param dataSeries     The data contained in a Vector of Doubles
     * @param searchInterval The indices between which anomalies should be detected. [a, b).
