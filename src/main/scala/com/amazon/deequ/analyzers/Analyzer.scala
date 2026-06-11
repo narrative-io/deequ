@@ -1,5 +1,5 @@
 /**
- * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may not
  * use this file except in compliance with the License. A copy of the License
@@ -17,19 +17,20 @@
 package com.amazon.deequ.analyzers
 
 import com.amazon.deequ.analyzers.Analyzers._
+import com.amazon.deequ.analyzers.FilteredRowOutcome.FilteredRowOutcome
 import com.amazon.deequ.analyzers.NullBehavior.NullBehavior
 import com.amazon.deequ.analyzers.runners._
-import com.amazon.deequ.metrics.FullColumn
-import com.amazon.deequ.utilities.ColumnUtil.removeEscapeColumn
 import com.amazon.deequ.metrics.DoubleMetric
 import com.amazon.deequ.metrics.Entity
+import com.amazon.deequ.metrics.FullColumn
 import com.amazon.deequ.metrics.Metric
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types._
+import com.amazon.deequ.utilities.ColumnUtil.removeEscapeColumn
 import org.apache.spark.sql.Column
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
 
 import scala.language.existentials
 import scala.util.Failure
@@ -69,7 +70,7 @@ trait Analyzer[S <: State[_], +M <: Metric[_]] extends Serializable {
     * @param data data frame
     * @return
     */
-  def computeStateFrom(data: DataFrame): Option[S]
+  def computeStateFrom(data: DataFrame, filterCondition: Option[String] = None): Option[S]
 
   /**
     * Compute the metric from the state (sufficient statistics)
@@ -77,6 +78,14 @@ trait Analyzer[S <: State[_], +M <: Metric[_]] extends Serializable {
     * @return
     */
   def computeMetricFrom(state: Option[S]): M
+
+  /**
+    * Returns the columns this analyzer reads from the data, if known statically.
+    * Returns Some(columns) when all referenced columns can be determined,
+    * or None when the analyzer may reference arbitrary columns (e.g. free-form SQL predicates).
+    * Used by AnalysisRunner to enable column pruning for V2 DataSource connectors like Iceberg.
+    */
+  def columnsReferenced(): Option[Set[String]] = None
 
   /**
     * A set of assertions that must hold on the schema of the data frame
@@ -97,13 +106,14 @@ trait Analyzer[S <: State[_], +M <: Metric[_]] extends Serializable {
   def calculate(
       data: DataFrame,
       aggregateWith: Option[StateLoader] = None,
-      saveStatesWith: Option[StatePersister] = None)
+      saveStatesWith: Option[StatePersister] = None,
+      filterCondition: Option[String] = None)
     : M = {
 
     try {
       preconditions.foreach { condition => condition(data.schema) }
 
-      val state = computeStateFrom(data)
+      val state = computeStateFrom(data, filterCondition)
 
       calculateMetric(state, aggregateWith, saveStatesWith)
     } catch {
@@ -171,6 +181,11 @@ trait Analyzer[S <: State[_], +M <: Metric[_]] extends Serializable {
     source.load[S](this).foreach { state => target.persist(this, state) }
   }
 
+  private[deequ] def getRowLevelFilterTreatment(analyzerOptions: Option[AnalyzerOptions]): FilteredRowOutcome = {
+    analyzerOptions
+      .map { options => options.filteredRow }
+      .getOrElse(FilteredRowOutcome.TRUE)
+  }
 }
 
 /** An analyzer that runs a set of aggregation functions over the data,
@@ -184,7 +199,7 @@ trait ScanShareableAnalyzer[S <: State[_], +M <: Metric[_]] extends Analyzer[S, 
   private[deequ] def fromAggregationResult(result: Row, offset: Int): Option[S]
 
   /** Runs aggregation functions directly, without scan sharing */
-  override def computeStateFrom(data: DataFrame): Option[S] = {
+  override def computeStateFrom(data: DataFrame, where: Option[String] = None): Option[S] = {
     val aggregations = aggregationFunctions()
     val result = data.agg(aggregations.head, aggregations.tail: _*).collect().head
     fromAggregationResult(result, 0)
@@ -255,10 +270,25 @@ case class NumMatchesAndCount(numMatches: Long, count: Long, override val fullCo
   }
 }
 
-case class AnalyzerOptions(nullBehavior: NullBehavior = NullBehavior.Ignore)
+sealed trait RowLevelStatusSource { def name: String }
+case object InScopeData extends RowLevelStatusSource { val name = "InScopeData" }
+case object FilteredData extends RowLevelStatusSource { val name = "FilteredData" }
+
+case class AnalyzerOptions(nullBehavior: NullBehavior = NullBehavior.Ignore,
+                           filteredRow: FilteredRowOutcome = FilteredRowOutcome.TRUE)
+
 object NullBehavior extends Enumeration {
   type NullBehavior = Value
   val Ignore, EmptyString, Fail = Value
+}
+
+object FilteredRowOutcome extends Enumeration {
+  type FilteredRowOutcome = Value
+  val NULL, TRUE = Value
+
+  implicit class FilteredRowOutcomeOps(value: FilteredRowOutcome) {
+    def getExpression: Column = expr(value.toString)
+  }
 }
 
 /** Base class for analyzers that compute ratios of matching predicates */
@@ -453,7 +483,7 @@ private[deequ] object Analyzers {
     if (nullInResult) {
       None
     } else {
-      Option(func(()))
+      Option(func(Unit))
     }
   }
 
@@ -461,33 +491,63 @@ private[deequ] object Analyzers {
     if (columns.size == 1) Entity.Column else Entity.Multicolumn
   }
 
-  def conditionalSelection(selection: String, where: Option[String]): Column = {
-    conditionalSelection(col(selection), where)
+  def conditionalSelection(selection: String, condition: Option[String]): Column = {
+    conditionalSelection(col(selection), condition)
   }
 
-  def conditionSelectionGivenColumn(selection: Column, where: Option[Column], replaceWith: Double): Column = {
-    where
+  def conditionSelectionGivenColumn(selection: Column, condition: Option[Column], replaceWith: Double): Column = {
+    condition
       .map { condition => when(condition, replaceWith).otherwise(selection) }
       .getOrElse(selection)
   }
 
-  def conditionSelectionGivenColumn(selection: Column, where: Option[Column], replaceWith: String): Column = {
-    where
+  def conditionSelectionGivenColumn(selection: Column, condition: Option[Column], replaceWith: String): Column = {
+    condition
       .map { condition => when(condition, replaceWith).otherwise(selection) }
       .getOrElse(selection)
   }
 
-  def conditionalSelection(selection: Column, where: Option[String], replaceWith: Double): Column = {
-    conditionSelectionGivenColumn(selection, where.map(expr), replaceWith)
+  def conditionSelectionGivenColumn(selection: Column, condition: Option[Column], replaceWith: Boolean): Column = {
+    condition
+      .map { condition => when(condition, replaceWith).otherwise(selection) }
+      .getOrElse(selection)
   }
 
-  def conditionalSelection(selection: Column, where: Option[String], replaceWith: String): Column = {
-    conditionSelectionGivenColumn(selection, where.map(expr), replaceWith)
+  def conditionalSelection(selection: Column, condition: Option[String], replaceWith: Double): Column = {
+    conditionSelectionGivenColumn(selection, condition.map(expr), replaceWith)
+  }
+
+  def conditionalSelection(selection: Column, condition: Option[String], replaceWith: String): Column = {
+    conditionSelectionGivenColumn(selection, condition.map(expr), replaceWith)
   }
 
   def conditionalSelection(selection: Column, condition: Option[String]): Column = {
     val conditionColumn = condition.map { expression => expr(expression) }
     conditionalSelectionFromColumns(selection, conditionColumn)
+  }
+
+  def conditionalSelectionWithAugmentedOutcome(selection: Column,
+                                               condition: Option[String]): Column = {
+    val origSelection = array(lit(InScopeData.name).as("source"), selection.as("selection"))
+
+    // The 2nd value in the array is set to null, but it can be set to anything.
+    // The value is not used to evaluate the row level outcome for filtered rows (to true/null).
+    // That decision is made using the 1st value which is set to "FilteredData" here.
+    val filteredSelection = array(lit(FilteredData.name).as("source"), lit(null).as("selection"))
+
+    condition
+      .map { cond => when(expr(cond), origSelection).otherwise(filteredSelection) }
+      .getOrElse(origSelection)
+  }
+
+  def conditionalSelectionFilteredFromColumns(selection: Column,
+                                              conditionColumn: Option[Column],
+                                              filterTreatment: FilteredRowOutcome): Column = {
+    conditionColumn
+      .map { condition =>
+        when(not(condition), filterTreatment.getExpression).when(condition, selection)
+      }
+      .getOrElse(selection)
   }
 
   private[this] def conditionalSelectionFromColumns(
@@ -528,6 +588,17 @@ private[deequ] object Analyzers {
       entity: Entity.Value = Entity.Column)
     : DoubleMetric = {
     metricFromFailure(emptyStateException(analyzer), name, instance, entity)
+  }
+
+  /** metricFromEmpty that preserves a fullColumn for correct row-level results
+    * when a WHERE clause filters out all rows. */
+  def metricFromEmptyWithColumn(
+      analyzer: Analyzer[_, _],
+      name: String,
+      instance: String,
+      fullColumn: Column)
+    : DoubleMetric = {
+    metricFromEmpty(analyzer, name, instance).copy(fullColumn = Some(fullColumn))
   }
 
   def metricFromFailure(

@@ -27,13 +27,16 @@ import com.google.gson._
 import com.google.gson.reflect.TypeToken
 
 import scala.collection._
+import scala.collection.JavaConverters._
 import java.util.{ArrayList => JArrayList, HashMap => JHashMap, List => JList, Map => JMap}
 import JsonSerializationConstants._
+import com.amazon.deequ.analyzers.FilteredRowOutcome.FilteredRowOutcome
 import com.amazon.deequ.analyzers.Histogram.{AggregateFunction, Count => HistogramCount, Sum => HistogramSum}
+import com.amazon.deequ.analyzers.NullBehavior.NullBehavior
 import org.apache.spark.sql.Column
 import org.apache.spark.sql.functions.expr
 
-import scala.jdk.CollectionConverters._
+import scala.collection.JavaConversions._
 
 private[repository] object JsonSerializationConstants {
 
@@ -51,6 +54,7 @@ private[repository] object JsonSerializationConstants {
   val TAGS_FIELD = "tags"
   val RESULT_KEY_FIELD = "resultKey"
   val ANALYZER_CONTEXT_FIELD = "analyzerContext"
+  val ANALYZER_OPTIONS_FIELD = "analyzerOptions"
 }
 
 private[deequ] object SimpleResultSerde {
@@ -69,7 +73,6 @@ private[deequ] object SimpleResultSerde {
       .asInstanceOf[JArrayList[JMap[String, String]]]
       .asScala
       .map(map => immutable.Map(map.asScala.toList: _*))
-      .toSeq
   }
 }
 
@@ -77,13 +80,17 @@ object AnalysisResultSerde {
 
   def serialize(analysisResults: Seq[AnalysisResult]): String = {
     val gson = new GsonBuilder()
+      .serializeSpecialFloatingPointValues()
       .registerTypeAdapter(classOf[ResultKey], ResultKeySerializer)
       .registerTypeAdapter(classOf[AnalysisResult], AnalysisResultSerializer)
       .registerTypeAdapter(classOf[AnalyzerContext], AnalyzerContextSerializer)
       .registerTypeAdapter(classOf[Analyzer[State[_], Metric[_]]],
         AnalyzerSerializer)
+      .registerTypeAdapter(classOf[AnalyzerOptions], AnalyzerOptionsSerializer)
       .registerTypeAdapter(classOf[Metric[_]], MetricSerializer)
       .registerTypeAdapter(classOf[Distribution], DistributionSerializer)
+      .registerTypeAdapter(classOf[DistributionBinned], DistributionBinnedSerializer)
+      .registerTypeAdapter(classOf[BucketDistribution], BucketDistributionSerializer)
       .setPrettyPrinting()
       .create
 
@@ -92,12 +99,16 @@ object AnalysisResultSerde {
 
   def deserialize(analysisResults: String): Seq[AnalysisResult] = {
     val gson = new GsonBuilder()
+      .serializeSpecialFloatingPointValues()
       .registerTypeAdapter(classOf[ResultKey], ResultKeyDeserializer)
       .registerTypeAdapter(classOf[AnalysisResult], AnalysisResultDeserializer)
       .registerTypeAdapter(classOf[AnalyzerContext], AnalyzerContextDeserializer)
       .registerTypeAdapter(classOf[Analyzer[State[_], Metric[_]]], AnalyzerDeserializer)
+      .registerTypeAdapter(classOf[AnalyzerOptions], AnalyzerOptionsDeserializer)
       .registerTypeAdapter(classOf[Metric[_]], MetricDeserializer)
       .registerTypeAdapter(classOf[Distribution], DistributionDeserializer)
+      .registerTypeAdapter(classOf[DistributionBinned], DistributionBinnedDeserializer)
+      .registerTypeAdapter(classOf[BucketDistribution], BucketDistributionDeserializer)
       .create
 
     gson.fromJson(analysisResults,
@@ -191,6 +202,20 @@ private[deequ] object AnalyzerContextSerializer extends JsonSerializer[AnalyzerC
   }
 }
 
+private[deequ] object AnalyzerOptionsSerializer extends JsonSerializer[AnalyzerOptions] {
+
+  override def serialize(src: AnalyzerOptions, typeOfSrc: Type,
+    context: JsonSerializationContext): JsonElement = {
+
+    val result = new JsonObject
+
+    result.addProperty("nullBehavior", src.nullBehavior.toString)
+    result.addProperty("filteredRow", src.filteredRow.toString)
+
+    result
+  }
+}
+
 private[deequ] object AnalyzerContextDeserializer extends JsonDeserializer[AnalyzerContext] {
 
   override def deserialize(jsonElement: JsonElement, t: Type,
@@ -231,11 +256,16 @@ private[deequ] object AnalyzerSerializer
         result.addProperty(ANALYZER_NAME_FIELD, "Size")
         result.addProperty(WHERE_FIELD, size.where.orNull)
 
+      case zerosCount: ZerosCount =>
+        result.addProperty(ANALYZER_NAME_FIELD, "ZerosCount")
+        result.addProperty(COLUMN_FIELD, zerosCount.column)
+        result.addProperty(WHERE_FIELD, zerosCount.where.orNull)
 
       case completeness: Completeness =>
         result.addProperty(ANALYZER_NAME_FIELD, "Completeness")
         result.addProperty(COLUMN_FIELD, completeness.column)
         result.addProperty(WHERE_FIELD, completeness.where.orNull)
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(completeness.analyzerOptions.orNull))
 
 
       case compliance: Compliance =>
@@ -244,17 +274,25 @@ private[deequ] object AnalyzerSerializer
         result.addProperty("instance", compliance.instance)
         result.addProperty("predicate", compliance.predicate)
         result.add(COLUMNS_FIELD, context.serialize(compliance.columns.asJava))
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(compliance.analyzerOptions.orNull))
 
       case patternMatch: PatternMatch =>
         result.addProperty(ANALYZER_NAME_FIELD, "PatternMatch")
         result.addProperty(COLUMN_FIELD, patternMatch.column)
         result.addProperty(WHERE_FIELD, patternMatch.where.orNull)
         result.addProperty("pattern", patternMatch.pattern.toString())
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(patternMatch.analyzerOptions.orNull))
 
       case sum: Sum =>
         result.addProperty(ANALYZER_NAME_FIELD, "Sum")
         result.addProperty(COLUMN_FIELD, sum.column)
         result.addProperty(WHERE_FIELD, sum.where.orNull)
+
+      case ratioOfSums: RatioOfSums =>
+        result.addProperty(ANALYZER_NAME_FIELD, "RatioOfSums")
+        result.addProperty("numerator", ratioOfSums.numerator)
+        result.addProperty("denominator", ratioOfSums.denominator)
+        result.addProperty(WHERE_FIELD, ratioOfSums.where.orNull)
 
       case mean: Mean =>
         result.addProperty(ANALYZER_NAME_FIELD, "Mean")
@@ -265,11 +303,23 @@ private[deequ] object AnalyzerSerializer
         result.addProperty(ANALYZER_NAME_FIELD, "Minimum")
         result.addProperty(COLUMN_FIELD, minimum.column)
         result.addProperty(WHERE_FIELD, minimum.where.orNull)
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(minimum.analyzerOptions.orNull))
 
       case maximum: Maximum =>
         result.addProperty(ANALYZER_NAME_FIELD, "Maximum")
         result.addProperty(COLUMN_FIELD, maximum.column)
         result.addProperty(WHERE_FIELD, maximum.where.orNull)
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(maximum.analyzerOptions.orNull))
+
+      case range: Range =>
+        result.addProperty(ANALYZER_NAME_FIELD, "Range")
+        result.addProperty(COLUMN_FIELD, range.column)
+        result.addProperty(WHERE_FIELD, range.where.orNull)
+
+      case iqr: InterquartileRange =>
+        result.addProperty(ANALYZER_NAME_FIELD, "InterquartileRange")
+        result.addProperty(COLUMN_FIELD, iqr.column)
+        result.addProperty(WHERE_FIELD, iqr.where.orNull)
 
       case countDistinct: CountDistinct =>
         result.addProperty(ANALYZER_NAME_FIELD, "CountDistinct")
@@ -293,16 +343,26 @@ private[deequ] object AnalyzerSerializer
         result.addProperty(ANALYZER_NAME_FIELD, "UniqueValueRatio")
         result.add(COLUMNS_FIELD, context.serialize(uniqueValueRatio.columns.asJava,
           new TypeToken[JList[String]]() {}.getType))
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(uniqueValueRatio.analyzerOptions.orNull))
 
       case uniqueness: Uniqueness =>
         result.addProperty(ANALYZER_NAME_FIELD, "Uniqueness")
         result.add(COLUMNS_FIELD, context.serialize(uniqueness.columns.asJava,
           new TypeToken[JList[String]]() {}.getType))
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(uniqueness.analyzerOptions.orNull))
+
+      case duplicateRowCount: DuplicateRowCount =>
+        result.addProperty(ANALYZER_NAME_FIELD, "DuplicateRowCount")
+        result.add(COLUMNS_FIELD, context.serialize(duplicateRowCount.columns.asJava,
+          new TypeToken[JList[String]]() {}.getType))
+        result.addProperty(WHERE_FIELD, duplicateRowCount.where.orNull)
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(duplicateRowCount.analyzerOptions.orNull))
 
       case histogram: Histogram if histogram.binningUdf.isEmpty =>
         result.addProperty(ANALYZER_NAME_FIELD, "Histogram")
         result.addProperty(COLUMN_FIELD, histogram.column)
         result.addProperty("maxDetailBins", histogram.maxDetailBins)
+        result.addProperty(WHERE_FIELD, histogram.where.orNull)
         // Count is initial and default implementation for Histogram
         // We don't include fields below in json to preserve json backward compatibility.
         if (histogram.aggregateFunction != Histogram.Count) {
@@ -310,8 +370,25 @@ private[deequ] object AnalyzerSerializer
           result.addProperty("aggregateColumn", histogram.aggregateFunction.aggregateColumn().get)
         }
 
+      case histogramBinned: HistogramBinned =>
+        result.addProperty(ANALYZER_NAME_FIELD, "HistogramBinned")
+        result.addProperty(COLUMN_FIELD, histogramBinned.column)
+        if (histogramBinned.binCount.isDefined) {
+          result.addProperty("binCount", histogramBinned.binCount.get)
+        }
+        if (histogramBinned.customEdges.isDefined) {
+          result.add("customEdges", context.serialize(histogramBinned.customEdges.get))
+        }
+        if (histogramBinned.includeOverflowBins) {
+          result.addProperty("includeOverflowBins", true)
+        }
+        result.addProperty(WHERE_FIELD, histogramBinned.where.orNull)
+
       case _ : Histogram =>
         throw new IllegalArgumentException("Unable to serialize Histogram with binningUdf!")
+
+      case _ : HistogramBinned =>
+        throw new IllegalArgumentException("Unable to serialize HistogramBinned with unsupported configuration!")
 
       case dataType: DataType =>
         result.addProperty(ANALYZER_NAME_FIELD, "DataType")
@@ -334,6 +411,21 @@ private[deequ] object AnalyzerSerializer
         result.addProperty(COLUMN_FIELD, standardDeviation.column)
         result.addProperty(WHERE_FIELD, standardDeviation.where.orNull)
 
+      case variance: Variance =>
+        result.addProperty(ANALYZER_NAME_FIELD, "Variance")
+        result.addProperty(COLUMN_FIELD, variance.column)
+        result.addProperty(WHERE_FIELD, variance.where.orNull)
+
+      case skewness: Skewness =>
+        result.addProperty(ANALYZER_NAME_FIELD, "Skewness")
+        result.addProperty(COLUMN_FIELD, skewness.column)
+        result.addProperty(WHERE_FIELD, skewness.where.orNull)
+
+      case kurtosis: Kurtosis =>
+        result.addProperty(ANALYZER_NAME_FIELD, "Kurtosis")
+        result.addProperty(COLUMN_FIELD, kurtosis.column)
+        result.addProperty(WHERE_FIELD, kurtosis.where.orNull)
+
       case approxQuantile: ApproxQuantile =>
         result.addProperty(ANALYZER_NAME_FIELD, "ApproxQuantile")
         result.addProperty(COLUMN_FIELD, approxQuantile.column)
@@ -346,22 +438,55 @@ private[deequ] object AnalyzerSerializer
         result.addProperty("quantiles", approxQuantiles.quantiles.mkString(","))
         result.addProperty("relativeError", approxQuantiles.relativeError)
 
+      case exactQuantile: ExactQuantile =>
+        result.addProperty(ANALYZER_NAME_FIELD, "ExactQuantile")
+        result.addProperty(COLUMN_FIELD, exactQuantile.column)
+        result.addProperty("quantile", exactQuantile.quantile)
+        result.addProperty(WHERE_FIELD, exactQuantile.where.orNull)
+
 
       case minLength: MinLength =>
         result.addProperty(ANALYZER_NAME_FIELD, "MinLength")
         result.addProperty(COLUMN_FIELD, minLength.column)
         result.addProperty(WHERE_FIELD, minLength.where.orNull)
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(minLength.analyzerOptions.orNull))
 
       case maxLength: MaxLength =>
         result.addProperty(ANALYZER_NAME_FIELD, "MaxLength")
         result.addProperty(COLUMN_FIELD, maxLength.column)
         result.addProperty(WHERE_FIELD, maxLength.where.orNull)
+        result.add(ANALYZER_OPTIONS_FIELD, context.serialize(maxLength.analyzerOptions.orNull))
+
+      case kllSketch: KLLSketch =>
+        result.addProperty(ANALYZER_NAME_FIELD, "KLLSketch")
+        result.addProperty(COLUMN_FIELD, kllSketch.column)
+        if (kllSketch.kllParameters.isDefined) {
+          val params = kllSketch.kllParameters.get
+          result.addProperty("sketchSize", params.sketchSize)
+          result.addProperty("shrinkingFactor", params.shrinkingFactor)
+          result.addProperty("numberOfBuckets", params.numberOfBuckets)
+        }
 
       case _ =>
         throw new IllegalArgumentException(s"Unable to serialize analyzer $analyzer.")
     }
 
     result
+  }
+}
+
+private[deequ] object AnalyzerOptionsDeserializer
+  extends JsonDeserializer[AnalyzerOptions] {
+
+  override def deserialize(jsonElement: JsonElement, t: Type,
+    context: JsonDeserializationContext): AnalyzerOptions = {
+
+    val jsonObject = jsonElement.getAsJsonObject
+
+    val nullBehavior = NullBehavior.withName(jsonObject.get("nullBehavior").getAsString)
+    val filteredRowOutcome = FilteredRowOutcome.withName(jsonObject.get("filteredRow").getAsString)
+
+    AnalyzerOptions(nullBehavior, filteredRowOutcome)
   }
 }
 
@@ -385,25 +510,41 @@ private[deequ] object AnalyzerDeserializer
       case "Size" =>
         Size(getOptionalWhereParam(json))
 
+      case "ZerosCount" =>
+        ZerosCount(
+          json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json))
+
       case "Completeness" =>
-        Completeness(json.get(COLUMN_FIELD).getAsString, getOptionalWhereParam(json))
+        Completeness(
+          json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json),
+          getOptionalAnalyzerOptions(json))
 
       case "Compliance" =>
         Compliance(
           json.get("instance").getAsString,
           json.get("predicate").getAsString,
           getOptionalWhereParam(json),
-          getColumnsAsSeq(context, json).toList)
+          getColumnsAsSeq(context, json).toList,
+          getOptionalAnalyzerOptions(json))
 
       case "PatternMatch" =>
         PatternMatch(
           json.get(COLUMN_FIELD).getAsString,
           json.get("pattern").getAsString.r,
-          getOptionalWhereParam(json))
+          getOptionalWhereParam(json),
+          getOptionalAnalyzerOptions(json))
 
       case "Sum" =>
         Sum(
           json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json))
+
+      case "RatioOfSums" =>
+        RatioOfSums(
+          json.get("numerator").getAsString,
+          json.get("denominator").getAsString,
           getOptionalWhereParam(json))
 
       case "Mean" =>
@@ -414,39 +555,77 @@ private[deequ] object AnalyzerDeserializer
       case "Minimum" =>
         Minimum(
           json.get(COLUMN_FIELD).getAsString,
-          getOptionalWhereParam(json))
+          getOptionalWhereParam(json),
+          getOptionalAnalyzerOptions(json))
 
       case "Maximum" =>
         Maximum(
           json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json),
+          getOptionalAnalyzerOptions(json))
+
+      case "Range" =>
+        Range(
+          json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json))
+
+      case "InterquartileRange" =>
+        InterquartileRange(
+          json.get(COLUMN_FIELD).getAsString,
           getOptionalWhereParam(json))
 
       case "CountDistinct" =>
-        CountDistinct(getColumnsAsSeq(context, json).toSeq)
+        CountDistinct(getColumnsAsSeq(context, json))
 
       case "Distinctness" =>
-        Distinctness(getColumnsAsSeq(context, json).toSeq)
+        Distinctness(getColumnsAsSeq(context, json))
 
       case "Entropy" =>
         Entropy(json.get(COLUMN_FIELD).getAsString)
 
       case "MutualInformation" =>
-        MutualInformation(getColumnsAsSeq(context, json).toSeq)
+        MutualInformation(getColumnsAsSeq(context, json))
 
       case "UniqueValueRatio" =>
-        UniqueValueRatio(getColumnsAsSeq(context, json).toSeq)
+        UniqueValueRatio(
+          getColumnsAsSeq(context, json),
+          analyzerOptions = getOptionalAnalyzerOptions(json))
 
       case "Uniqueness" =>
-        Uniqueness(getColumnsAsSeq(context, json).toSeq)
+        Uniqueness(
+          getColumnsAsSeq(context, json),
+          analyzerOptions = getOptionalAnalyzerOptions(json))
+
+      case "DuplicateRowCount" =>
+        DuplicateRowCount(
+          getColumnsAsSeq(context, json),
+          getOptionalWhereParam(json),
+          analyzerOptions = getOptionalAnalyzerOptions(json))
 
       case "Histogram" =>
         Histogram(
           json.get(COLUMN_FIELD).getAsString,
           None,
           json.get("maxDetailBins").getAsInt,
+          getOptionalWhereParam(json),
           aggregateFunction = createAggregateFunction(
             getOptionalStringParam(json, "aggregateFunction").getOrElse(Histogram.count_function),
             getOptionalStringParam(json, "aggregateColumn").getOrElse("")))
+
+      case "HistogramBinned" =>
+        val binCount = if (json.has("binCount")) Some(json.get("binCount").getAsInt) else None
+        val customEdges = if (json.has("customEdges")) {
+          Some(context.deserialize(json.get("customEdges"), classOf[Array[Double]]))
+        } else None
+        val includeOverflowBins = if (json.has("includeOverflowBins")) {
+          json.get("includeOverflowBins").getAsBoolean
+        } else false
+        HistogramBinned(
+          json.get(COLUMN_FIELD).getAsString,
+          binCount,
+          customEdges,
+          includeOverflowBins,
+          getOptionalWhereParam(json))
 
       case "DataType" =>
         DataType(
@@ -469,6 +648,21 @@ private[deequ] object AnalyzerDeserializer
           json.get(COLUMN_FIELD).getAsString,
           getOptionalWhereParam(json))
 
+      case "Variance" =>
+        Variance(
+          json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json))
+
+      case "Skewness" =>
+        Skewness(
+          json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json))
+
+      case "Kurtosis" =>
+        Kurtosis(
+          json.get(COLUMN_FIELD).getAsString,
+          getOptionalWhereParam(json))
+
       case "ApproxQuantile" =>
         val column = json.get(COLUMN_FIELD).getAsString
         val quantile = json.get("quantile").getAsDouble
@@ -481,15 +675,35 @@ private[deequ] object AnalyzerDeserializer
         val relativeError = json.get("relativeError").getAsDouble
         ApproxQuantiles(column, quantile, relativeError)
 
+      case "ExactQuantile" =>
+        val column = json.get(COLUMN_FIELD).getAsString
+        val quantile = json.get("quantile").getAsDouble
+        ExactQuantile(column, quantile)
+
       case "MinLength" =>
         MinLength(
           json.get(COLUMN_FIELD).getAsString,
-          getOptionalWhereParam(json))
+          getOptionalWhereParam(json),
+          getOptionalAnalyzerOptions(json))
 
       case "MaxLength" =>
         MaxLength(
           json.get(COLUMN_FIELD).getAsString,
-          getOptionalWhereParam(json))
+          getOptionalWhereParam(json),
+          getOptionalAnalyzerOptions(json))
+
+      case "KLLSketch" =>
+        val column = json.get(COLUMN_FIELD).getAsString
+        val kllParameters = if (json.has("sketchSize") && json.has("shrinkingFactor") && json.has("numberOfBuckets")) {
+          Some(KLLParameters(
+            json.get("sketchSize").getAsInt,
+            json.get("shrinkingFactor").getAsDouble,
+            json.get("numberOfBuckets").getAsInt
+          ))
+        } else {
+          None
+        }
+        KLLSketch(column, kllParameters)
 
       case analyzerName =>
         throw new IllegalArgumentException(s"Unable to deserialize analyzer $analyzerName.")
@@ -505,6 +719,34 @@ private[deequ] object AnalyzerDeserializer
   private[this] def getOptionalStringParam(jsonObject: JsonObject, field: String): Option[String] = {
     if (jsonObject.has(field)) {
       Option(jsonObject.get(field).getAsString)
+    } else {
+      None
+    }
+  }
+
+  private[this] def getOptionalAnalyzerOptions(jsonObject: JsonObject): Option[AnalyzerOptions] = {
+
+    if (jsonObject.has("analyzerOptions")) {
+      val options = jsonObject.get("analyzerOptions").getAsJsonObject
+
+      val nullBehavior = if (options.has("nullBehavior")) {
+        Some(NullBehavior.withName(options.get("nullBehavior").getAsString))
+      } else {
+        None
+      }
+
+      val filteredRowOutcome = if (options.has("filteredRow")) {
+        Some(FilteredRowOutcome.withName(options.get("filteredRow").getAsString))
+      } else {
+        None
+      }
+
+      (nullBehavior, filteredRowOutcome) match {
+        case (Some(nb), Some(fr)) => Some(AnalyzerOptions(nb, fr))
+        case (None, Some(fr)) => Some(AnalyzerOptions(filteredRow = fr))
+        case (Some(nb), None) => Some(AnalyzerOptions(nullBehavior = nb))
+        case _ => None
+      }
     } else {
       None
     }
@@ -547,6 +789,13 @@ private[deequ] object MetricSerializer extends JsonSerializer[Metric[_]] {
         result.add("value", context.serialize(histogramMetric.value.get,
           classOf[Distribution]))
 
+      case histogramBinnedMetric: HistogramBinnedMetric =>
+        result.addProperty("metricName", "HistogramBinnedMetric")
+        result.addProperty(COLUMN_FIELD, histogramBinnedMetric.column)
+        result.addProperty("numberOfBins", histogramBinnedMetric.value.get.numberOfBins)
+        result.add("value", context.serialize(histogramBinnedMetric.value.get,
+          classOf[DistributionBinned]))
+
       case keyedDoubleMetric: KeyedDoubleMetric =>
         result.addProperty("metricName", "KeyedDoubleMetric")
         result.addProperty("entity", keyedDoubleMetric.entity.toString)
@@ -559,6 +808,13 @@ private[deequ] object MetricSerializer extends JsonSerializer[Metric[_]] {
             values.addProperty(key, value)
           }
           result.add("value", values)
+        }
+
+      case kllMetric: KLLMetric =>
+        result.addProperty("metricName", "KLLMetric")
+        result.addProperty(COLUMN_FIELD, kllMetric.column)
+        if (kllMetric.value.isSuccess) {
+          result.add("value", context.serialize(kllMetric.value.get, classOf[BucketDistribution]))
         }
 
       case _ =>
@@ -592,13 +848,19 @@ private[deequ] object MetricDeserializer extends JsonDeserializer[Metric[_]] {
           Try(context.deserialize(jsonObject.get("value"),
             classOf[Distribution]).asInstanceOf[Distribution]))
 
+      case "HistogramBinnedMetric" =>
+        HistogramBinnedMetric(
+          jsonObject.get(COLUMN_FIELD).getAsString,
+          Try(context.deserialize(jsonObject.get("value"),
+            classOf[DistributionBinned]).asInstanceOf[DistributionBinned]))
+
       case "KeyedDoubleMetric" =>
         val entity = Entity.withName(jsonObject.get("entity").getAsString)
         val name = jsonObject.get("name").getAsString
         val instance = jsonObject.get("instance").getAsString
         if (jsonObject.has("value")) {
           val entries = jsonObject.get("value").getAsJsonObject
-          val values = entries.entrySet().asScala.map { entry =>
+          val values = entries.entrySet().map { entry =>
             entry.getKey -> entry.getValue.getAsDouble
           }
           .toMap
@@ -609,6 +871,15 @@ private[deequ] object MetricDeserializer extends JsonDeserializer[Metric[_]] {
           KeyedDoubleMetric(entity, name, instance, Failure(null))
         }
 
+      case "KLLMetric" =>
+        val column = jsonObject.get(COLUMN_FIELD).getAsString
+        if (jsonObject.has("value")) {
+          val bucketDistribution = context.deserialize(jsonObject.get("value"), classOf[BucketDistribution])
+            .asInstanceOf[BucketDistribution]
+          KLLMetric(column, Success(bucketDistribution))
+        } else {
+          KLLMetric(column, Failure(new Exception("No value found for KLLMetric")))
+        }
 
       case metricName =>
         throw new IllegalArgumentException(s"Unable to deserialize analyzer $metricName.")
@@ -646,6 +917,10 @@ private[deequ] object DistributionSerializer extends JsonSerializer[Distribution
 
     result.add("values", values)
 
+    if (distribution.tailCount > 0) {
+      result.addProperty("tailCount", distribution.tailCount)
+    }
+
     result
   }
 }
@@ -666,6 +941,133 @@ private[deequ] object DistributionDeserializer extends JsonDeserializer[Distribu
       }
       .toMap
 
-    Distribution(values, jsonObject.get("numberOfBins").getAsLong)
+    Distribution(values, jsonObject.get("numberOfBins").getAsLong,
+      if (jsonObject.has("tailCount")) jsonObject.get("tailCount").getAsLong else 0L)
+  }
+}
+
+private[deequ] object DistributionBinnedSerializer extends JsonSerializer[DistributionBinned]{
+
+  override def serialize(distributionBinned: DistributionBinned, t: Type,
+    context: JsonSerializationContext): JsonElement = {
+
+    val result = new JsonObject()
+    result.addProperty("numberOfBins", distributionBinned.numberOfBins)
+
+    val bins = new JsonArray()
+    distributionBinned.bins.foreach { binData =>
+      val bin = new JsonObject()
+      bin.addProperty("binStart", binData.binStart)
+      bin.addProperty("binEnd", binData.binEnd)
+      bin.addProperty("frequency", binData.frequency)
+      bin.addProperty("ratio", binData.ratio)
+      bins.add(bin)
+    }
+
+    result.add("bins", bins)
+
+    if (distributionBinned.nullCount > 0) {
+      result.addProperty("nullCount", distributionBinned.nullCount)
+    }
+
+    result
+  }
+}
+
+private[deequ] object DistributionBinnedDeserializer extends JsonDeserializer[DistributionBinned] {
+
+  override def deserialize(jsonElement: JsonElement, t: Type,
+    context: JsonDeserializationContext): DistributionBinned = {
+
+    val jsonObject = jsonElement.getAsJsonObject
+
+    val bins = jsonObject.get("bins").getAsJsonArray.asScala
+      .map { binElement =>
+        val binObject = binElement.getAsJsonObject
+        BinData(
+          binObject.get("binStart").getAsDouble,
+          binObject.get("binEnd").getAsDouble,
+          binObject.get("frequency").getAsLong,
+          binObject.get("ratio").getAsDouble
+        )
+      }
+      .toVector
+
+    val nullCount = if (jsonObject.has("nullCount")) {
+      jsonObject.get("nullCount").getAsLong
+    } else 0L
+
+    DistributionBinned(bins, jsonObject.get("numberOfBins").getAsLong, nullCount)
+  }
+}
+
+private[deequ] object BucketDistributionSerializer extends JsonSerializer[BucketDistribution] {
+
+  override def serialize(bucketDistribution: BucketDistribution, t: Type,
+    context: JsonSerializationContext): JsonElement = {
+
+    val result = new JsonObject()
+
+    val bucketsArray = new JsonArray()
+    bucketDistribution.buckets.foreach { bucket =>
+      val bucketObj = new JsonObject()
+      bucketObj.addProperty("lowValue", bucket.lowValue)
+      bucketObj.addProperty("highValue", bucket.highValue)
+      bucketObj.addProperty("count", bucket.count)
+      bucketsArray.add(bucketObj)
+    }
+    result.add("buckets", bucketsArray)
+
+    val parametersArray = new JsonArray()
+    bucketDistribution.parameters.foreach { param =>
+      parametersArray.add(new JsonPrimitive(param))
+    }
+    result.add("parameters", parametersArray)
+
+    val dataArray = new JsonArray()
+    bucketDistribution.data.foreach { row =>
+      val rowArray = new JsonArray()
+      row.foreach { value =>
+        rowArray.add(new JsonPrimitive(value))
+      }
+      dataArray.add(rowArray)
+    }
+    result.add("data", dataArray)
+
+    result
+  }
+}
+
+private[deequ] object BucketDistributionDeserializer extends JsonDeserializer[BucketDistribution] {
+
+  override def deserialize(jsonElement: JsonElement, t: Type,
+    context: JsonDeserializationContext): BucketDistribution = {
+
+    val jsonObject = jsonElement.getAsJsonObject
+
+    val buckets = jsonObject.get("buckets").getAsJsonArray.asScala
+      .map { bucketElement =>
+        val bucketObj = bucketElement.getAsJsonObject
+        BucketValue(
+          bucketObj.get("lowValue").getAsDouble,
+          bucketObj.get("highValue").getAsDouble,
+          bucketObj.get("count").getAsLong
+        )
+      }
+      .toList
+
+    val parameters = jsonObject.get("parameters").getAsJsonArray.asScala
+      .map(_.getAsDouble)
+      .toList
+
+    val data = jsonObject.get("data").getAsJsonArray.asScala
+      .map { rowElement =>
+        rowElement.getAsJsonArray.asScala
+          .map(_.getAsDouble)
+          .toArray
+      }
+      .toArray
+
+    BucketDistribution(buckets, parameters, data)
   }
 }

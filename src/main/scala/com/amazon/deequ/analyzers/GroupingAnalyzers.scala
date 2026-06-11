@@ -32,6 +32,7 @@ import org.apache.spark.sql.functions.count
 import org.apache.spark.sql.functions.expr
 import org.apache.spark.sql.functions.lit
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.functions.when
 
 /** Base class for all analyzers that operate the frequencies of groups in the data */
 abstract class FrequencyBasedAnalyzer(columnsToGroupOn: Seq[String])
@@ -39,8 +40,9 @@ abstract class FrequencyBasedAnalyzer(columnsToGroupOn: Seq[String])
 
   override def groupingColumns(): Seq[String] = { columnsToGroupOn }
 
-  override def computeStateFrom(data: DataFrame): Option[FrequenciesAndNumRows] = {
-    Some(FrequencyBasedAnalyzer.computeFrequencies(data, groupingColumns()))
+  override def computeStateFrom(data: DataFrame,
+                                filterCondition: Option[String] = None): Option[FrequenciesAndNumRows] = {
+    Some(FrequencyBasedAnalyzer.computeFrequencies(data, groupingColumns(), filterCondition))
   }
 
   /** We need at least one grouping column, and all specified columns must exist */
@@ -65,10 +67,17 @@ object FrequencyBasedAnalyzer {
       where: Option[String] = None)
     : FrequenciesAndNumRows = {
 
-    val columnsToGroupBy = groupingColumns.map { name => col(name) }.toArray
+    // Resolve empty groupingColumns to all DataFrame columns.
+    // Only DuplicateRowCount can reach here with empty columns (it overrides preconditions
+    // to skip atLeastOne check). All other analyzers enforce atLeastOne(columnsToGroupOn)
+    // which rejects empty columns before this method is called.
+    require(groupingColumns.nonEmpty || data.columns.nonEmpty,
+      "groupingColumns is empty and DataFrame has no columns")
+    val resolvedColumns = if (groupingColumns.isEmpty) data.columns.toSeq else groupingColumns
+    val columnsToGroupBy = resolvedColumns.map { name => col(name) }.toArray
     val projectionColumns = columnsToGroupBy :+ col(COUNT_COL)
 
-    val atLeastOneNonNullGroupingColumn = groupingColumns
+    val atLeastOneNonNullGroupingColumn = resolvedColumns
       .foldLeft(expr(false.toString)) { case (condition, name) =>
         condition.or(col(name).isNotNull)
       }
@@ -88,7 +97,14 @@ object FrequencyBasedAnalyzer {
       .count()
 
     // Set rows with value count 1 to true, and otherwise false
-    val fullColumn: Column = count(UNIQUENESS_ID).over(Window.partitionBy(columnsToGroupBy: _*))
+    val fullColumn: Column = {
+      val window = Window.partitionBy(columnsToGroupBy: _*)
+      where.map {
+        condition =>
+          count(when(expr(condition), UNIQUENESS_ID)).over(window)
+      }.getOrElse(count(UNIQUENESS_ID).over(window))
+    }
+
     FrequenciesAndNumRows(frequencies, numRows, Option(fullColumn))
   }
 

@@ -31,7 +31,8 @@ import com.amazon.deequ.repository.SimpleResultSerde
 import org.apache.spark.sql.Column
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.monotonically_increasing_id
+import org.apache.spark.sql.functions.lit
+import org.apache.spark.sql.functions.{col, monotonically_increasing_id}
 
 import java.util.UUID
 
@@ -96,11 +97,10 @@ object VerificationResult {
       data: DataFrame): DataFrame = {
 
     val columnNamesToMetrics: Map[String, Column] = verificationResultToColumn(verificationResult)
+    val columnsAliased = columnNamesToMetrics.toSeq.map { case (name, col) => col.as(name) }
 
     val dataWithID = data.withColumn(UNIQUENESS_ID, monotonically_increasing_id())
-    columnNamesToMetrics.foldLeft(dataWithID)(
-      (dataWithID, newColumn: (String, Column)) =>
-        dataWithID.withColumn(newColumn._1, newColumn._2)).drop(UNIQUENESS_ID)
+    dataWithID.select(col("*") +: columnsAliased: _*).drop(UNIQUENESS_ID)
   }
 
   def checkResultsAsJson(verificationResult: VerificationResult,
@@ -145,9 +145,9 @@ object VerificationResult {
     val constraint = constraintResult.constraint
     constraint match {
       case asserted: RowLevelAssertedConstraint =>
-        constraintResult.metric.flatMap(metricToColumn).map(asserted.assertion(_))
+        constraintResult.metric.flatMap(metricToColumn).map(asserted.assertion(_)).orElse(Some(lit(false)))
       case _: RowLevelConstraint =>
-        constraintResult.metric.flatMap(metricToColumn)
+        constraintResult.metric.flatMap(metricToColumn).orElse(Some(lit(false)))
       case _: RowLevelGroupedConstraint =>
         constraintResult.metric.flatMap(metricToColumn)
       case _ => None
@@ -160,7 +160,6 @@ object VerificationResult {
       case _ => None
     }
   }
-
 
   private[this] def getSimplifiedCheckResultOutput(
       verificationResult: VerificationResult)
@@ -186,14 +185,6 @@ object VerificationResult {
       }
   }
 
-  // remove private as it breaks somethingwith scala 2.13
-  // java.lang.RuntimeException: Error while encoding: java.util.concurrent.ExecutionException:
-  // org.codehaus.commons.compiler.CompileException:
-  // File 'generated.java', Line 105, Column 25: failed to compile:
-  // org.codehaus.commons.compiler.CompileException: File 'generated.java',
-  // Line 105, Column 25: No applicable constructor/method found for zero actual parameters; candidates are:
-  // "public java.lang.String com.amazon.deequ.VerificationResult$SimpleCheckResultOutput.constraintStatus()"
-  // private[this]
-  case class SimpleCheckResultOutput(checkDescription: String, checkLevel: String,
+  private[this] case class SimpleCheckResultOutput(checkDescription: String, checkLevel: String,
     checkStatus: String, constraint: String, constraintStatus: String, constraintMessage: String)
 }

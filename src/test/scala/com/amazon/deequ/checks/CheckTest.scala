@@ -1,5 +1,5 @@
 /**
-  * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  * Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
   *
   * Licensed under the Apache License, Version 2.0 (the "License"). You may not
   * use this file except in compliance with the License. A copy of the License
@@ -18,20 +18,30 @@ package com.amazon.deequ
 package checks
 
 import com.amazon.deequ.analyzers._
-import com.amazon.deequ.analyzers.runners.{AnalysisRunner, AnalyzerContext}
-import com.amazon.deequ.anomalydetection.{Anomaly, AnomalyDetectionStrategy}
-import com.amazon.deequ.constraints.{ConstrainableDataTypes, ConstraintStatus}
-import com.amazon.deequ.metrics.{DoubleMetric, Entity}
+import com.amazon.deequ.analyzers.runners.AnalysisRunner
+import com.amazon.deequ.analyzers.runners.AnalyzerContext
+import com.amazon.deequ.anomalydetection.Anomaly
+import com.amazon.deequ.anomalydetection.AnomalyDetectionStrategy
+import com.amazon.deequ.constraints.ConstrainableDataTypes
+import com.amazon.deequ.constraints.ConstraintStatus
+import com.amazon.deequ.metrics.DoubleMetric
+import com.amazon.deequ.metrics.Entity
 import com.amazon.deequ.repository.memory.InMemoryMetricsRepository
-import com.amazon.deequ.repository.{MetricsRepository, ResultKey}
+import com.amazon.deequ.repository.MetricsRepository
+import com.amazon.deequ.repository.ResultKey
 import com.amazon.deequ.utils.FixtureSupport
+import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.when
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.SparkSession
 import org.scalamock.scalatest.MockFactory
-import org.scalatest.wordspec.AnyWordSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatest.wordspec.AnyWordSpec
 
-import scala.util.{Success, Try}
+import scala.util.Success
+import scala.util.Try
 
 class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with FixtureSupport
   with MockFactory {
@@ -52,18 +62,39 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       val check3 = Check(CheckLevel.Warning, "group-2-W")
         .hasCompleteness("att2", _ > 0.8) // 0.75
 
+      val check4 = Check(CheckLevel.Error, "group-3")
+        .isComplete("att2", None) // 1.0 with filter
+        .where("att2 is NOT NULL")
+        .hasCompleteness("att2", _ == 1.0, None) // 1.0 with filter
+        .where("att2 is NOT NULL")
+
       val context = runChecks(getDfCompleteAndInCompleteColumns(sparkSession),
-        check1, check2, check3)
+        check1, check2, check3, check4)
 
       context.metricMap.foreach { println }
 
       assertEvaluatesTo(check1, context, CheckStatus.Success)
       assertEvaluatesTo(check2, context, CheckStatus.Error)
       assertEvaluatesTo(check3, context, CheckStatus.Warning)
+      assertEvaluatesTo(check4, context, CheckStatus.Success)
 
       assert(check1.getRowLevelConstraintColumnNames() == Seq("Completeness-att1", "Completeness-att1"))
       assert(check2.getRowLevelConstraintColumnNames() == Seq("Completeness-att2"))
       assert(check3.getRowLevelConstraintColumnNames() == Seq("Completeness-att2"))
+      assert(check4.getRowLevelConstraintColumnNames() == Seq("Completeness-att2", "Completeness-att2"))
+    }
+
+    "return the correct check status for completeness with where filter" in withSparkSession { sparkSession =>
+
+      val check = Check(CheckLevel.Error, "group-3")
+        .hasCompleteness("ZipCode", _ > 0.6, None) // 1.0 with filter
+        .where("City is NOT NULL")
+
+      val context = runChecks(getDfForWhereClause(sparkSession), check)
+
+      assertEvaluatesTo(check, context, CheckStatus.Success)
+
+      assert(check.getRowLevelConstraintColumnNames() == Seq("Completeness-ZipCode"))
     }
 
     "return the correct check status for combined completeness" in
@@ -145,6 +176,8 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
         .isUnique("halfUniqueCombinedWithNonUnique").where("nonUnique > 0")
         .isUnique("nonUnique")
         .isUnique("nonUniqueWithNulls")
+        .areUnique(Seq("nonUnique", "onlyUniqueWithOtherNonUnique"))
+        .areUnique(Seq("nonUnique", "halfUniqueCombinedWithNonUnique"))
 
       val context = runChecks(getDfWithUniqueColumns(sparkSession), check)
       val result = check.evaluate(context)
@@ -154,9 +187,10 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       assert(constraintStatuses.head == ConstraintStatus.Success)
       assert(constraintStatuses(1) == ConstraintStatus.Success)
       assert(constraintStatuses(2) == ConstraintStatus.Success)
-
       assert(constraintStatuses(3) == ConstraintStatus.Failure)
       assert(constraintStatuses(4) == ConstraintStatus.Failure)
+      assert(constraintStatuses(5) == ConstraintStatus.Success)
+      assert(constraintStatuses(6) == ConstraintStatus.Failure)
     }
 
     "return the correct check status for primary key" in withSparkSession { sparkSession =>
@@ -246,6 +280,19 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       assert(constraintStatuses(8) == ConstraintStatus.Success)
       // Single-column uniqueness with hint, duplicates filtered out
       assert(constraintStatuses(9) == ConstraintStatus.Success)
+    }
+
+    "return the correct check status for hasDuplicateRowCount" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq(("a", 1), ("b", 2), ("a", 1), ("c", 3)).toDF("col1", "col2")
+
+      val check = Check(CheckLevel.Error, "duplicate-row-count-check")
+        .hasDuplicateRowCount(Seq("col1", "col2"), _ == 2)
+
+      val context = runChecks(df, check)
+      val result = check.evaluate(context)
+
+      assert(result.status == CheckStatus.Success)
     }
 
     "return the correct check status for hasUniqueValueRatio" in withSparkSession { sparkSession =>
@@ -445,6 +492,39 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       assertEvaluatesTo(isPositiveCheck, results, CheckStatus.Success)
     }
 
+    "handle column names with spaces in isNonNegative" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq((1L, "a"), (2L, "b"), (3L, "c"), (-1L, "d")).toDF("my column", "other")
+      val check = Check(CheckLevel.Error, "space check").isNonNegative("my column")
+      val result = VerificationSuite().onData(df).addCheck(check).run()
+      assert(result.checkResults(check).status == CheckStatus.Error)
+    }
+
+    "detect negative bigint values in isNonNegative" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq(-99999999999L, 1L, 2L).toDF("val")
+      val check = Check(CheckLevel.Error, "bigint check").isNonNegative("val")
+      val result = VerificationSuite().onData(df).addCheck(check).run()
+      assert(result.checkResults(check).status == CheckStatus.Error)
+    }
+
+    "handle column names with spaces in isPositive" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq((1L, "a"), (2L, "b"), (0L, "c")).toDF("my column", "other")
+      val check = Check(CheckLevel.Error, "space check").isPositive("my column")
+      val result = VerificationSuite().onData(df).addCheck(check).run()
+      assert(result.checkResults(check).status == CheckStatus.Error)
+    }
+
+    "handle column names with spaces in comparison checks" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq((1, 2), (3, 4), (5, 0)).toDF("col a", "col b")
+      val check = Check(CheckLevel.Error, "comparison check")
+        .isLessThan("col a", "col b")
+      val result = VerificationSuite().onData(df).addCheck(check).run()
+      assert(result.checkResults(check).status == CheckStatus.Error)
+    }
+
     "correctly evaluate range constraints" in withSparkSession { sparkSession =>
       val rangeCheck = Check(CheckLevel.Error, "a")
         .isContainedIn("att1", Array("a", "b", "c"))
@@ -505,39 +585,317 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       assertEvaluatesTo(numericRangeCheck9, numericRangeResults, CheckStatus.Success)
     }
 
+    "correctly evaluate range constraints when values have single quote in string" in withSparkSession { sparkSession =>
+      val rangeCheck = Check(CheckLevel.Error, "a")
+        .isContainedIn("att2", Array("can't", "help", "but", "wouldn't"))
+
+      val rangeResults = runChecks(getDfWithDistinctValuesQuotes(sparkSession), rangeCheck)
+      assertEvaluatesTo(rangeCheck, rangeResults, CheckStatus.Success)
+    }
+
     "return the correct check status for histogram constraints" in
       withSparkSession { sparkSession =>
 
-        val check1 = Check(CheckLevel.Error, "group-1")
+        // Basic categorical value assertions
+        val check1 = Check(CheckLevel.Error, "basic-categorical-tests")
           .hasNumberOfDistinctValues("att1", _ < 10)
-          .hasHistogramValues("att1", _ ("a").absolute == 4)
-          .hasHistogramValues("att1", _ ("b").absolute == 2)
-          .hasHistogramValues("att1", _ ("a").ratio > 0.6)
-          .hasHistogramValues("att1", _ ("b").ratio < 0.4)
-          .hasHistogramValues("att1", _ ("a").absolute == 3)
-          .where("att2 is not null")
-          .hasHistogramValues("att1", _ ("b").absolute == 1)
-          .where("att2 is not null")
+          .hasHistogramValues("att1", _ ("a").absolute == 4)  // Value "a" appears exactly 4 times
+          .hasHistogramValues("att1", _ ("b").absolute == 2)  // Value "b" appears exactly 2 times
+          .hasHistogramValues("att1", _ ("a").ratio > 0.6)    // Value "a" is >60% of data
+          .hasHistogramValues("att1", _ ("b").ratio < 0.4)    // Value "b" is <40% of data
 
-        val check2 = Check(CheckLevel.Error, "group-1")
+        // Filtered constraint tests (with WHERE clauses)
+        val check2 = Check(CheckLevel.Error, "filtered-constraint-tests")
+          .hasHistogramValues("att1", _ ("a").absolute == 3)
+          .where("att2 is not null") // Filtered: "a" appears 3 times when att2 not null
+          .hasHistogramValues("att1", _ ("b").absolute == 1)
+          .where("att2 is not null") // Filtered: "b" appears 1 time when att2 not null
+
+        // Null value handling tests
+        val check3 = Check(CheckLevel.Error, "null-handling-tests")
           .hasNumberOfDistinctValues("att2", _ == 3)
           .hasNumberOfDistinctValues("att2", _ == 2).where("att1 = 'a'")
-          .hasHistogramValues("att2", _ ("f").absolute == 3)
-          .hasHistogramValues("att2", _ ("d").absolute == 1)
-          .hasHistogramValues("att2", _ (Histogram.NullFieldReplacement).absolute == 2)
-          .hasHistogramValues("att2", _ ("f").ratio == 3 / 6.0)
-          .hasHistogramValues("att2", _ ("d").ratio == 1 / 6.0)
+          .hasHistogramValues("att2", _ ("f").absolute == 3) // Value "f" appears 3 times
+          .hasHistogramValues("att2", _ ("d").absolute == 1) // Value "d" appears 1 time
+          .hasHistogramValues("att2", _ (Histogram.NullFieldReplacement).absolute == 2) // Nulls appear 2 times
+          .hasHistogramValues("att2", _ ("f").ratio == 3 / 6.0) // Value "f" is exactly 50%
+          .hasHistogramValues("att2", _ ("d").ratio == 1 / 6.0) // Value "d" is exactly 16.67%
           .hasHistogramValues("att2", _ (Histogram.NullFieldReplacement).ratio == 2 / 6.0)
 
-        val check3 = Check(CheckLevel.Error, "group-1")
-          .hasNumberOfDistinctValues("unKnownColumn", _ == 3)
+        // Edge case tests (boundary conditions, empty categories)
+        val check4 = Check(CheckLevel.Error, "edge-case-tests")
+          .hasHistogramValues("att1", !_.values.contains("nonexistent"))  // Fake category not present
+          .hasHistogramValues("att2", _ ("f").ratio <= 1.0)               // Ratio boundary: <= 1.0
+          .hasHistogramValues("att2", _ ("d").ratio >= 0.0)               // Ratio boundary: >= 0.0
 
-        val context = runChecks(getDfCompleteAndInCompleteColumns(sparkSession), check1,
-          check2, check3)
+        // Complex filter conditions (multiple WHERE clauses)
+        val check5 = Check(CheckLevel.Error, "complex-filter-tests")
+          .hasHistogramValues("att1", _ ("a").absolute >= 1)
+          .where("att2 = 'f'")          // Complex filter: att1="a" when att2="f"
+          .hasHistogramValues("att2", _ ("f").absolute >= 2)
+          .where("att1 in ('a', 'b')")  // Complex filter: att2="f" when att1 in set
 
-        assertEvaluatesTo(check1, context, CheckStatus.Success)
-        assertEvaluatesTo(check2, context, CheckStatus.Success)
-        assertEvaluatesTo(check3, context, CheckStatus.Error)
+        // maxBins parameter tests (different bin limits show different distinct values)
+        val check6 = Check(CheckLevel.Error, "maxBins-parameter-tests")
+          .hasHistogramValues("att1", _ ("a").absolute == 4, maxBins = 10)  // Custom maxBins = 10
+          .hasHistogramValues("att2", _ ("f").absolute == 3, maxBins = 5)   // Custom maxBins = 5
+          .hasHistogramValues("att2",  // With maxBins=1, only top value "f" tracked, "d" not present
+            !_.values.contains("d"), maxBins = 1)
+
+        // aggregate function tests
+        val numericDf = sparkSession.createDataFrame(Seq(
+          ("a", 10), ("a", 20), ("b", 30), ("b", 40)
+        )).toDF("category", "value")
+
+        val check7 = Check(CheckLevel.Error, "aggregate-function-tests")
+          .hasHistogramValues("category", _ ("a").absolute == 2) // Count aggregation (default)
+
+        // failure cases (error conditions)
+        val check8 = Check(CheckLevel.Error, "failure-tests")
+          .hasNumberOfDistinctValues("unKnownColumn", _ == 3) // Fake column should fail
+
+        val context1 = runChecks(getDfCompleteAndInCompleteColumns(sparkSession),
+          check1, check2, check3, check4, check5, check6, check8)
+        val context2 = runChecks(numericDf, check7)
+
+        assertEvaluatesTo(check1, context1, CheckStatus.Success)
+        assertEvaluatesTo(check2, context1, CheckStatus.Success)
+        assertEvaluatesTo(check3, context1, CheckStatus.Success)
+        assertEvaluatesTo(check4, context1, CheckStatus.Success)
+        assertEvaluatesTo(check5, context1, CheckStatus.Success)
+        assertEvaluatesTo(check6, context1, CheckStatus.Success)
+        assertEvaluatesTo(check7, context2, CheckStatus.Success)
+        assertEvaluatesTo(check8, context1, CheckStatus.Error)
+      }
+
+    "handle DataFrame with column named 'count' in hasNumberOfDistinctValues" in
+      withSparkSession { sparkSession =>
+        import sparkSession.implicits._
+        val df = Seq(("id_0", 1), ("id_1", 2), ("id_2", 3)).toDF("id", "count")
+        val check = Check(CheckLevel.Error, "count column check")
+          .hasNumberOfDistinctValues("count", _ == 3)
+        val result = VerificationSuite().onData(df).addCheck(check).run()
+        assert(result.checkResults(check).status == CheckStatus.Success)
+      }
+
+    "handle DataFrame with column named 'count' in Histogram with Sum aggregation" in
+      withSparkSession { sparkSession =>
+        import sparkSession.implicits._
+        import com.amazon.deequ.analyzers.runners.AnalysisRunner
+        val df = Seq(("a", 10, 1), ("a", 20, 2), ("b", 30, 3)).toDF("category", "value", "count")
+        val analyzer = Histogram("category", aggregateFunction = Histogram.Sum("value"))
+        val result = AnalysisRunner.onData(df).addAnalyzer(analyzer).run()
+        val metric = result.metricMap(analyzer)
+        assert(metric.value.isSuccess)
+      }
+
+    "return the correct check status for histogram binned constraints" in
+      withSparkSession { sparkSession =>
+
+        // Create test data with known distribution (20 values, 5 bins)
+        val df = sparkSession.createDataFrame(Seq(
+          (1, Some(10.0)), (2, Some(12.0)), (3, Some(15.0)), (4, Some(18.0)), (5, Some(20.0)),
+          (6, Some(25.0)), (7, Some(28.0)), (8, Some(30.0)), (9, Some(32.0)), (10, Some(35.0)),
+          (11, Some(40.0)), (12, Some(42.0)), (13, Some(45.0)), (14, Some(48.0)), (15, Some(50.0)),
+          (16, Some(55.0)), (17, Some(58.0)), (18, Some(60.0)), (19, Some(65.0)), (20, None)
+        )).toDF("id", "value")
+
+        // Bin-specific assertions
+        val check1 = Check(CheckLevel.Error, "bin-specific-tests")
+          .hasHistogramBinnedValues("value", _.bins(0).frequency >= 1, Some(5))   // First bin has >=1 value
+          .hasHistogramBinnedValues("value", _.bins(2).ratio >= 0.0, Some(5))     // Third bin has some ratio
+          .hasHistogramBinnedValues("value", _.bins.last.frequency >= 0, Some(5)) // Last bin exists
+
+        // Null handling
+        val check2 = Check(CheckLevel.Error, "null-handling-tests")
+          // Null count exists and has one value
+          .hasHistogramBinnedValues("value", _.nullCount > 0, Some(5))
+          .hasHistogramBinnedValues("value", _.nullCount == 1, Some(5))
+
+        // Distribution shape tests
+        val check3 = Check(CheckLevel.Error, "distribution-shape-tests")
+          .hasHistogramBinnedValues("value",
+            _.bins.count(_.frequency > 0) >= 3, Some(5))  // At least 3 non-empty bins
+          .hasHistogramBinnedValues("value",
+            _.bins.exists(_.frequency > 2), Some(5))      // Some bin has >2 values (peak detection)
+          .hasHistogramBinnedValues("value",
+            _.bins.forall(_.frequency <= 20), Some(5))    // No bin is too large (outlier detection)
+
+        // Range / interval tests
+        val check4 = Check(CheckLevel.Error, "range-interval-tests")
+          .hasHistogramBinnedValues("value", _.bins.filter(b => b.binStart >= 20 && b.binEnd <= 40)
+            .map(_.frequency).sum >= 2, Some(5))      // Values in 20-40 range
+          .hasHistogramBinnedValues("value",  // First bin starts at reasonable value
+            _.bins(0).binStart <= 15, Some(5))
+          .hasHistogramBinnedValues("value",  // Last bin ends at reasonable value
+            _.bins.last.binEnd >= 60, Some(5))
+
+        // Statistical distribution tests
+        val check5 = Check(CheckLevel.Error, "statistical-tests")
+          .hasHistogramBinnedValues("value",
+            _.bins.maxBy(_.frequency).binStart >= 0, Some(5))  // Peak is in reasonable range
+          .hasHistogramBinnedValues("value",
+            _.bins.take(2).map(_.frequency).sum >= 1, Some(5)) // Left bins have some data
+          .hasHistogramBinnedValues("value",
+            _.bins.forall(b => b.frequency >= 0), Some(5))     // All frequencies non-negative
+
+        // Bin structure tests
+        val check6 = Check(CheckLevel.Error, "bin-structure-tests")
+          .hasHistogramBinnedBins("value", _ >= 5, Some(5))                 // Expected number of bins
+          .hasHistogramBinnedValues("value", _.numberOfBins >= 5, Some(5))  // numberOfBins matches
+          .hasHistogramBinnedValues("value", _.bins.forall(b => b.binEnd > b.binStart), Some(5)) // Valid bin ranges
+
+        // Filtered constraint tests (WHERE clauses)
+        val check7 = Check(CheckLevel.Error, "filtered-binned-tests")
+          .hasHistogramBinnedValues("value", _.bins.exists(_.frequency > 0), Some(5))
+          .where("id <= 10")    // Filter to first 10 rows
+          .hasHistogramBinnedBins("value", _ >= 3, Some(5))
+          .where("value > 20")  // Filter to values > 20
+
+        // Aggregate function tests
+        val numericDf = sparkSession.createDataFrame(Seq(
+          (1, 10.0, 5), (2, 15.0, 3), (3, 25.0, 7), (4, 35.0, 2), (5, 45.0, 8)
+        )).toDF("id", "value", "weight")
+
+        val check8 = Check(CheckLevel.Error, "aggregate-binned-tests")
+          .hasHistogramBinnedValues("value", _.bins.exists(_.frequency > 0), Some(3))
+          .hasHistogramBinnedValues("value", _.bins.forall(_.frequency >= 0), Some(3))
+
+        // Failure cases
+        val check9 = Check(CheckLevel.Error, "failure-tests")
+          .hasHistogramBinnedValues("value", _.bins.isEmpty, Some(5)) // Should fail - no bins
+          .hasHistogramBinnedBins("value", _ == 0, Some(5))           // Should fail - zero bins
+
+        val context1 = runChecks(df, check1, check2, check3, check4, check5, check6, check9)
+        val context2 = runChecks(df, check7)  // Filtered tests on original data
+        val context3 = runChecks(numericDf, check8)  // Aggregate tests on numeric data
+
+        assertEvaluatesTo(check1, context1, CheckStatus.Success)
+        assertEvaluatesTo(check2, context1, CheckStatus.Success)
+        assertEvaluatesTo(check3, context1, CheckStatus.Success)
+        assertEvaluatesTo(check4, context1, CheckStatus.Success)
+        assertEvaluatesTo(check5, context1, CheckStatus.Success)
+        assertEvaluatesTo(check6, context1, CheckStatus.Success)
+        assertEvaluatesTo(check7, context2, CheckStatus.Success)
+        assertEvaluatesTo(check8, context3, CheckStatus.Success)
+        assertEvaluatesTo(check9, context1, CheckStatus.Error)
+      }
+
+    "return the correct check status for histogram binned constraints with custom edges" in
+      withSparkSession { sparkSession =>
+
+        // Create test data for custom edges (income tax bracket scenario)
+        val df = sparkSession.createDataFrame(Seq(
+          (1, Some(25000.0)), (2, Some(35000.0)), (3, Some(120000.0)), (4, Some(150000.0)),
+          (5, Some(65000.0)), (6, Some(200000.0)), (7, Some(45000.0)), (8, Some(55000.0)),
+          (9, Some(75000.0)), (10, Some(85000.0)), (11, Some(95000.0)), (12, None)
+        )).toDF("id", "income")
+
+        // Custom edges for tax brackets: 0-40k, 40k-100k, 100k-300k
+        val incomeEdges = Array(0.0, 40000.0, 100000.0, 300000.0)
+
+        // Bin-specific assertions with custom edges
+        val check1 = Check(CheckLevel.Error, "custom-edges-bin-tests")
+          .hasHistogramBinnedValues(
+            "income", _.bins(0).frequency >= 1, customEdges = Some(incomeEdges)
+          ) // Low bracket has values
+          .hasHistogramBinnedValues(
+            "income", _.bins(1).frequency >= 3, customEdges = Some(incomeEdges)
+          ) // Middle bracket has multiple values
+          .hasHistogramBinnedValues(
+            "income", _.bins(2).frequency >= 1, customEdges = Some(incomeEdges)
+          ) // High bracket has values
+
+        // Null handling with custom edges
+        val check2 = Check(CheckLevel.Error, "custom-edges-null-tests")
+          .hasHistogramBinnedValues(
+            "income",
+            _.nullCount > 0,
+            customEdges = Some(incomeEdges)
+          )
+          .hasHistogramBinnedValues(
+            "income",
+            _.nullCount == 1,
+            customEdges = Some(incomeEdges)
+          )
+
+        // Distribution shape tests with custom edges
+        val check3 = Check(CheckLevel.Error, "custom-edges-distribution-tests")
+          .hasHistogramBinnedValues(
+            "income", _.bins.count(_.frequency > 0) >= 3, customEdges = Some(incomeEdges)
+          ) // All brackets have data
+          .hasHistogramBinnedValues(
+            "income", _.bins.exists(_.frequency >= 6), customEdges = Some(incomeEdges)
+          ) // Middle bracket is most populated
+          .hasHistogramBinnedValues(
+            "income", _.bins.forall(_.frequency <= 10), customEdges = Some(incomeEdges)
+          ) // No bracket too large
+
+        // Range / interval tests with custom edges
+        val check4 = Check(CheckLevel.Error, "custom-edges-range-tests")
+          .hasHistogramBinnedValues(
+            "income", _.bins(0).binStart == 0.0, customEdges = Some(incomeEdges)
+          ) // First bracket starts at 0
+          .hasHistogramBinnedValues(
+            "income", _.bins(0).binEnd == 40000.0, customEdges = Some(incomeEdges)
+          ) // First bracket ends at 40k
+          .hasHistogramBinnedValues(
+            "income", _.bins(1).binStart == 40000.0, customEdges = Some(incomeEdges)
+          ) // Second bracket starts at 40k
+          .hasHistogramBinnedValues(
+            "income", _.bins(2).binEnd == 300000.0, customEdges = Some(incomeEdges)
+          ) // Last bracket ends at 300k
+
+        // Statistical distribution tests with custom edges
+        val check5 = Check(CheckLevel.Error, "custom-edges-statistical-tests")
+          .hasHistogramBinnedValues(
+            "income",
+            _.bins.maxBy(_.frequency).binStart >= 40000.0,
+            customEdges = Some(incomeEdges)
+          ) // Peak in middle/high bracket
+          .hasHistogramBinnedValues(
+            "income",
+            _.bins.forall(_.frequency >= 0),
+            customEdges = Some(incomeEdges)
+          )
+          .hasHistogramBinnedValues(
+            "income",
+            _.bins.map(_.frequency).sum >= 11,
+            customEdges = Some(incomeEdges)
+          ) // Total non-null values
+
+        // Bin structure tests with custom edges
+        val check6 = Check(CheckLevel.Error, "custom-edges-structure-tests")
+          .hasHistogramBinnedBins("income", _ >= 3)                 // Expected number of bins
+          .hasHistogramBinnedValues(
+            "income", _.numberOfBins >= 3, customEdges = Some(incomeEdges)
+          ) // numberOfBins matches
+          .hasHistogramBinnedValues("income", _.bins.forall(b => b.binEnd > b.binStart),
+            customEdges = Some(incomeEdges)) // Valid bin ranges
+
+        // Filtered constraint tests with custom edges
+        val check7 = Check(CheckLevel.Error, "custom-edges-filtered-tests")
+          .hasHistogramBinnedValues("income", _.bins.exists(_.frequency > 0), customEdges = Some(incomeEdges))
+          .where("id <= 6")    // Filter to first 6 rows (low-middle income)
+          .hasHistogramBinnedBins("income", _ >= 2)
+          .where("income > 100000")  // Filter to high income only
+
+        // Failure cases with custom edges
+        val check8 = Check(CheckLevel.Error, "custom-edges-failure-tests")
+          .hasHistogramBinnedValues("income", _.bins.isEmpty, customEdges = Some(incomeEdges)) // Should fail - has bins
+          .hasHistogramBinnedBins("income", _ == 0)           // Should fail - has bins
+
+        val context1 = runChecks(df, check1, check2, check3, check4, check5, check6)
+        val context2 = runChecks(df, check7)
+
+        assertEvaluatesTo(check1, context1, CheckStatus.Success)
+        assertEvaluatesTo(check2, context1, CheckStatus.Success)
+        assertEvaluatesTo(check3, context1, CheckStatus.Success)
+        assertEvaluatesTo(check4, context1, CheckStatus.Success)
+        assertEvaluatesTo(check5, context1, CheckStatus.Success)
+        assertEvaluatesTo(check6, context1, CheckStatus.Success)
+        assertEvaluatesTo(check7, context2, CheckStatus.Success)
+        assertEvaluatesTo(check8, context1, CheckStatus.Error)
       }
 
     "return the correct check status for entropy constraints" in withSparkSession { sparkSession =>
@@ -581,19 +939,28 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       val dfUninformative = getDfWithConditionallyUninformativeColumns(sparkSession)
 
       val numericAnalysis = AnalysisRunner.onData(dfNumeric).addAnalyzers(Seq(
-        Minimum("att1"), Maximum("att1"), Mean("att1"), Sum("att1"),
-        StandardDeviation("att1"), ApproxCountDistinct("att1"),
-        ApproxQuantile("att1", quantile = 0.5)))
+        Minimum("att1"), Maximum("att1"), Range("att1"),
+        InterquartileRange("att1"), Mean("att1"), Sum("att1"),
+        StandardDeviation("att1"), Variance("att1"), Skewness("att1"),
+        Kurtosis("att1"), ApproxCountDistinct("att1"),
+        ApproxQuantile("att1", quantile = 0.5), ExactQuantile("att1", quantile = 0.5)))
 
       val contextNumeric = numericAnalysis.run()
 
       assertSuccess(baseCheck.hasMin("att1", _ == 1.0), contextNumeric)
       assertSuccess(baseCheck.hasMax("att1", _ == 6.0), contextNumeric)
+      assertSuccess(baseCheck.hasRange("att1", _ == 5.0), contextNumeric)
+      assertSuccess(baseCheck.hasInterquartileRange(
+        "att1", _ == 2.5), contextNumeric)
       assertSuccess(baseCheck.hasMean("att1", _ == 3.5), contextNumeric)
       assertSuccess(baseCheck.hasSum("att1", _ == 21.0), contextNumeric)
       assertSuccess(baseCheck.hasStandardDeviation("att1", _ == 1.707825127659933), contextNumeric)
+      assertSuccess(baseCheck.hasVariance("att1", _ == 2.9166666666666665), contextNumeric)
+      assertSuccess(baseCheck.hasSkewness("att1", _ == 0.0), contextNumeric)
+      assertSuccess(baseCheck.hasKurtosis("att1", _ < 0.0), contextNumeric)
       assertSuccess(baseCheck.hasApproxCountDistinct("att1", _ == 6.0), contextNumeric)
       assertSuccess(baseCheck.hasApproxQuantile("att1", quantile = 0.5, _ == 3.0), contextNumeric)
+      assertSuccess(baseCheck.hasExactQuantile("att1", quantile = 0.5, _ == 3.5), contextNumeric)
 
       val correlationAnalysisInformative = AnalysisRunner.onData(dfInformative)
         .addAnalyzer(Correlation("att1", "att2"))
@@ -634,6 +1001,19 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
       assertSuccess(hasApproxQuantileCheckWithFilter, context)
     }
 
+    "correctly evaluate hasExactQuantile constraints" in withSparkSession { sparkSession =>
+      val hasExactQuantileCheck = Check(CheckLevel.Error, "a")
+        .hasExactQuantile("att1", quantile = 0.5, _ == 3.5)
+      val hasExactQuantileCheckWithFilter = Check(CheckLevel.Error, "a")
+        .hasExactQuantile("att1", quantile = 0.5, _ == 5.0).where("att2 > 0")
+
+      val context = runChecks(getDfWithNumericValues(sparkSession), hasExactQuantileCheck,
+        hasExactQuantileCheckWithFilter)
+
+      assertSuccess(hasExactQuantileCheck, context)
+      assertSuccess(hasExactQuantileCheckWithFilter, context)
+    }
+
     "yield correct results for minimum and maximum length stats" in
       withSparkSession { sparkSession =>
         val baseCheck = Check(CheckLevel.Error, description = "a description")
@@ -644,6 +1024,21 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
         assertSuccess(baseCheck.hasMinLength("att1", _ == 0.0), context)
         assertSuccess(baseCheck.hasMaxLength("att1", _ == 4.0), context)
     }
+
+    "yield correct results for minimum and maximum length stats with where clause" in
+      withSparkSession { sparkSession =>
+        val emptyNulLBehavior = Option(AnalyzerOptions(NullBehavior.EmptyString))
+        val baseCheck = Check(CheckLevel.Error, description = "a description")
+        val df = getDfCompleteAndInCompleteColumnsAndVarLengthStrings(sparkSession)
+        val context = AnalysisRunner.onData(df)
+          .addAnalyzers(Seq(MinLength("item", Option("val1 > 3"), emptyNulLBehavior),
+            MaxLength("item", Option("val1 <= 3"), emptyNulLBehavior))).run()
+
+        assertSuccess(baseCheck.hasMinLength("item", _ >= 4.0, analyzerOptions = emptyNulLBehavior)
+          .where("val1 > 3"), context) // 1 without where clause
+        assertSuccess(baseCheck.hasMaxLength("item", _ <= 3.0, analyzerOptions = emptyNulLBehavior)
+          .where("val1 <= 3"), context) // 6 without where clause
+      }
 
     "work on regular expression patterns for E-Mails" in withSparkSession { sparkSession =>
       val col = "some"
@@ -1091,6 +1486,152 @@ class CheckTest extends AnyWordSpec with Matchers with SparkContextSpec with Fix
           assert(sizeAnomalyCheck.evaluate(contextNoRows).status == CheckStatus.Error)
         }
       }
+  }
+
+  /**
+   * Test for DataSync in verification suite.
+   */
+  "Check hasDataInSync" should {
+
+    val colMapAtt1 = Map("att1" -> "att1")
+    val colMapTwoCols = Map("att1" -> "att1", "att2" -> "att2")
+
+    "yield success for basic data sync test for 1 col" in withSparkSession { sparkSession =>
+      val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+
+      val check = Check(CheckLevel.Error, "must have data in sync")
+        .doesDatasetMatch(dfInformative, colMapAtt1, _ > 0.9, hint = Some("show be in sync"))
+      val context = runChecks(dfInformative, check)
+
+      assertSuccess(check, context)
+
+      val check2 = Check(CheckLevel.Error, "must have data in sync")
+        .doesDatasetMatch(dfInformative, colMapAtt1, _ > 0.9, Some(colMapAtt1), Some("show be in sync with match col"))
+      val context2 = runChecks(dfInformative, check2)
+
+      assertSuccess(check2, context2)
+    }
+
+    "yield failure when column doesnt exist in data sync test for 1 col" in withSparkSession { sparkSession =>
+      val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+      val dfInformativeRenamed = dfInformative.withColumnRenamed("att1", "att1_renamed")
+
+      val check = Check(CheckLevel.Error, "must fail as columns does not exist")
+        .doesDatasetMatch(dfInformativeRenamed, colMapAtt1, _ > 0.9,
+          hint = Some("must fail as columns does not exist"))
+      val context = runChecks(dfInformative, check)
+      assertEvaluatesTo(check, context, CheckStatus.Error)
+
+    }
+
+    "yield failure when row count varies in data sync test for 1 col" in withSparkSession { sparkSession =>
+      val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+      val dfInformativeFiltered = dfInformative.filter("att1 > 2")
+
+      val check = Check(CheckLevel.Error, "must fail as columns does not exist")
+        .doesDatasetMatch(dfInformativeFiltered, colMapAtt1, _ > 0.9,
+          hint = Some("must fail as columns does not exist"))
+      val context = runChecks(dfInformative, check)
+      assertEvaluatesTo(check, context, CheckStatus.Error)
+    }
+
+    "yield failed assertion for 0.9 for 1 col" in withSparkSession { sparkSession =>
+      val df = getDfWithConditionallyInformativeColumns(sparkSession)
+      val modifiedDf = df.withColumn("att1", when(col("att1") === 3, 4)
+        .otherwise(col("att1")))
+
+      val check = Check(CheckLevel.Error, "must fail as rows mismatches")
+        .doesDatasetMatch(modifiedDf, colMapAtt1, _ > 0.9, hint = Some("must fail as rows mismatches"))
+      val context = runChecks(df, check)
+      assertEvaluatesTo(check, context, CheckStatus.Error)
+
+    }
+
+    "yield failed assertion for 0.6 for 1 col" in withSparkSession { sparkSession =>
+      val df = getDfWithConditionallyInformativeColumns(sparkSession)
+      val modifiedDf = df.withColumn("att1", when(col("att1") === 3, 4)
+        .otherwise(col("att1")))
+
+      val check = Check(CheckLevel.Error, "must be success as rows count mismatches at assertion 0.6")
+        .doesDatasetMatch(modifiedDf, colMapAtt1, _ > 0.6,
+          hint = Some("must be success as rows count mismatches at assertion 0.6"))
+      val context = runChecks(df, check)
+      assertSuccess(check, context)
+    }
+
+
+    "yield success for basic data sync test for multiple columns" in withSparkSession { sparkSession =>
+      val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+
+      val check = Check(CheckLevel.Error, "must have data in sync")
+        .doesDatasetMatch(dfInformative, colMapTwoCols, _ > 0.9, hint = Some("show be in sync"))
+      val context = runChecks(dfInformative, check)
+
+      assertSuccess(check, context)
+    }
+
+    "yield success for basic data sync test for multiple columns and one col match" in
+      withSparkSession { sparkSession =>
+        val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+
+        val check = Check(CheckLevel.Error, "must have data in sync")
+          .doesDatasetMatch(dfInformative, colMapTwoCols, _ > 0.9, Some(colMapAtt1), hint = Some("show be in sync"))
+        val context = runChecks(dfInformative, check)
+
+        assertSuccess(check, context)
+      }
+
+    "yield failure when column doesnt exist in data sync test for multiple columns" in withSparkSession {
+      sparkSession =>
+        val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+        val dfInformativeRenamed = dfInformative.withColumnRenamed("att1", "att1_renamed")
+
+        val check = Check(CheckLevel.Error, "must fail as columns does not exist")
+          .doesDatasetMatch(dfInformativeRenamed, colMapTwoCols, _ > 0.9,
+            hint = Some("must fail as columns does not exist"))
+        val context = runChecks(dfInformative, check)
+
+        assertEvaluatesTo(check, context, CheckStatus.Error)
+    }
+
+    "yield failure when row count varies in data sync test for multiple columns" in withSparkSession { sparkSession =>
+      val dfInformative = getDfWithConditionallyInformativeColumns(sparkSession)
+      val dfInformativeFiltered = dfInformative.filter("att1 > 2")
+
+      val check = Check(CheckLevel.Error, "must fail as columns does not exist")
+        .doesDatasetMatch(dfInformativeFiltered, colMapTwoCols, _ > 0.9,
+          hint = Some("must fail as columns does not exist"))
+      val context = runChecks(dfInformative, check)
+
+      assertEvaluatesTo(check, context, CheckStatus.Error)
+    }
+
+    "yield failed assertion for 0.9 for multiple columns" in withSparkSession { sparkSession =>
+      val df = getDfWithConditionallyInformativeColumns(sparkSession)
+      val modifiedDf = df.withColumn("att1", when(col("att1") === 3, 4)
+        .otherwise(col("att1")))
+
+      val check = Check(CheckLevel.Error, "must fail as rows mismatches")
+        .doesDatasetMatch(modifiedDf, colMapTwoCols, _ > 0.9, hint = Some("must fail as rows mismatches"))
+      val context = runChecks(df, check)
+
+      assertEvaluatesTo(check, context, CheckStatus.Error)
+
+    }
+
+    "yield failed assertion for 0.6 for multiple columns" in withSparkSession { sparkSession =>
+      val df = getDfWithConditionallyInformativeColumns(sparkSession)
+      val modifiedDf = df.withColumn("att1", when(col("att1") === 3, 4)
+        .otherwise(col("att1")))
+
+      val check = Check(CheckLevel.Error, "must be success as metric value is 0.66")
+        .doesDatasetMatch(modifiedDf, colMapTwoCols, _ > 0.6,
+          hint = Some("must be success as metric value is 0.66"))
+      val context = runChecks(df, check)
+
+      assertSuccess(check, context)
+    }
+
   }
 
   /** Run anomaly detection using a repository with some previous analysis results for testing */

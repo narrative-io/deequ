@@ -17,7 +17,6 @@
 package com.amazon.deequ
 package analyzers
 
-import com.amazon.deequ
 import com.amazon.deequ.analyzers.runners.NoSuchColumnException
 import com.amazon.deequ.metrics.Distribution
 import com.amazon.deequ.metrics.DistributionValue
@@ -51,6 +50,34 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
     }
   }
 
+  "ZerosCount analyzer" should {
+    "compute correct metrics for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      // att2 has values [0, 0, 0, 5, 6, 7] -> 3 zeros
+      val result = ZerosCount("att2").calculate(df).value
+      result shouldBe Success(3.0)
+    }
+    "fail for non-numeric data" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(ZerosCount("att1").calculate(df).value.isFailure)
+    }
+  }
+
+  "DuplicateRowCount analyzer" should {
+    "compute correct metrics" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq(("a", 1), ("b", 2), ("a", 1), ("c", 3)).toDF("col1", "col2")
+      val result = DuplicateRowCount(Seq("col1", "col2")).calculate(df).value
+      result shouldBe Success(2.0)
+    }
+    "return 0 when no duplicates" in withSparkSession { sparkSession =>
+      import sparkSession.implicits._
+      val df = Seq(("a", 1), ("b", 2), ("c", 3)).toDF("col1", "col2")
+      val result = DuplicateRowCount(Seq("col1", "col2")).calculate(df).value
+      result shouldBe Success(0.0)
+    }
+  }
+
   "Completeness analyzer" should {
 
     "compute correct metrics" in withSparkSession { sparkSession =>
@@ -64,7 +91,9 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
       val result2 = Completeness("att2").calculate(dfMissing)
       assert(result2 == DoubleMetric(Entity.Column,
         "Completeness", "att2", Success(0.75), result2.fullColumn))
-
+      val result3 = Completeness("att2", Option("att1 is NOT NULL")).calculate(dfMissing)
+      assert(result3 == DoubleMetric(Entity.Column,
+      "Completeness", "att2", Success(4.0/6.0), result3.fullColumn))
     }
 
     "fail on wrong column input" in withSparkSession { sparkSession =>
@@ -350,7 +379,6 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
       val dataTypes = DataTypeInstances.values.map { _.toString }
 
       val zeros = dataTypes
-        .unsorted
         .diff { nonZeroValuesWithStringKeys.map { case (distKey, _) => distKey }.toSet }
         .map(dataType => dataType -> DistributionValue(0, 0.0))
         .toSeq
@@ -363,33 +391,33 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
     "fail for non-atomic columns" in withSparkSession { sparkSession =>
       val df = getDfWithNestedColumn(sparkSession)
 
-      assert(deequ.analyzers.DataType("source").calculate(df).value.isFailure)
+      assert(DataType("source").calculate(df).value.isFailure)
     }
 
     "fall back to String in case no known data type matched" in withSparkSession { sparkSession =>
       val df = getDfFull(sparkSession)
 
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe
+      DataType("att1").calculate(df).value shouldBe
         Success(distributionFrom(DataTypeInstances.String -> DistributionValue(4, 1.0)))
     }
 
     "detect integral type correctly" in withSparkSession { sparkSession =>
       val df = getDfWithNumericValues(sparkSession)
       val expectedResult = distributionFrom(DataTypeInstances.Integral -> DistributionValue(6, 1.0))
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect integral type correctly for negative numbers" in withSparkSession { sparkSession =>
       val df = getDfWithNegativeNumbers(sparkSession)
       val expectedResult = distributionFrom(DataTypeInstances.Integral -> DistributionValue(4, 1.0))
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect fractional type correctly for negative numbers" in withSparkSession { sparkSession =>
       val df = getDfWithNegativeNumbers(sparkSession)
       val expectedResult =
         distributionFrom(DataTypeInstances.Fractional -> DistributionValue(4, 1.0))
-      deequ.analyzers.DataType("att2").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att2").calculate(df).value shouldBe Success(expectedResult)
     }
 
 
@@ -398,14 +426,14 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
         .withColumn("att1_float", col("att1").cast(FloatType))
       val expectedResult =
         distributionFrom(DataTypeInstances.Fractional -> DistributionValue(6, 1.0))
-        deequ.analyzers.DataType("att1_float").calculate(df).value shouldBe Success(expectedResult)
+        DataType("att1_float").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect integral type in string column" in withSparkSession { sparkSession =>
       val df = getDfWithNumericValues(sparkSession)
         .withColumn("att1_str", col("att1").cast(StringType))
       val expectedResult = distributionFrom(DataTypeInstances.Integral -> DistributionValue(6, 1.0))
-      deequ.analyzers.DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect fractional type in string column" in withSparkSession { sparkSession =>
@@ -414,19 +442,19 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
       val expectedResult =
         distributionFrom(DataTypeInstances.Fractional -> DistributionValue(6, 1.0))
-      deequ.analyzers.DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1_str").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "fall back to string in case the string column didn't match " +
       " any known other data type" in withSparkSession { sparkSession =>
       val df = getDfFull(sparkSession)
       val expectedResult = distributionFrom(DataTypeInstances.String -> DistributionValue(4, 1.0))
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "detect fractional for mixed fractional and integral" in withSparkSession { sparkSession =>
       val df = getDfFractionalIntegralTypes(sparkSession)
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Fractional -> DistributionValue(1, 0.5),
           DataTypeInstances.Integral -> DistributionValue(1, 0.5)
@@ -436,7 +464,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
     "fall back to string for mixed fractional and string" in withSparkSession { sparkSession =>
       val df = getDfFractionalStringTypes(sparkSession)
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Fractional -> DistributionValue(1, 0.5),
           DataTypeInstances.String -> DistributionValue(1, 0.5)
@@ -446,7 +474,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
     "fall back to string for mixed integral and string" in withSparkSession { sparkSession =>
       val df = getDfIntegralStringTypes(sparkSession)
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Integral -> DistributionValue(1, 0.5),
           DataTypeInstances.String -> DistributionValue(1, 0.5)
@@ -456,7 +484,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
     "integral for numeric and null" in withSparkSession { sparkSession =>
       val df = getDfWithUniqueColumns(sparkSession)
-      deequ.analyzers.DataType("uniqueWithNulls").calculate(df).value shouldBe Success(
+      DataType("uniqueWithNulls").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Unknown -> DistributionValue(1, 1.0/6.0),
           DataTypeInstances.Integral -> DistributionValue(5, 5.0/6.0)
@@ -473,7 +501,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
 
       val expectedResult = distributionFrom(DataTypeInstances.Boolean -> DistributionValue(2, 1.0))
 
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(expectedResult)
+      DataType("att1").calculate(df).value shouldBe Success(expectedResult)
     }
 
     "fall back to string for boolean and null" in withSparkSession { sparkSession =>
@@ -485,7 +513,7 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
         ("4", "2.0")
       ).toDF("item", "att1")
 
-      deequ.analyzers.DataType("att1").calculate(df).value shouldBe Success(
+      DataType("att1").calculate(df).value shouldBe Success(
         distributionFrom(
           DataTypeInstances.Fractional -> DistributionValue(1, 0.25),
           DataTypeInstances.Unknown -> DistributionValue(1, 0.25),
@@ -522,6 +550,37 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
       assert(StandardDeviation("att1").calculate(df).value.isFailure)
     }
 
+    "compute variance correctly for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      val result = Variance("att1").calculate(df).value
+      result shouldBe Success(2.9166666666666665)
+    }
+    "fail to compute variance for non numeric type" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(Variance("att1").calculate(df).value.isFailure)
+    }
+
+    "compute skewness correctly for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      // [1,2,3,4,5,6] is symmetric, skewness = 0
+      val result = Skewness("att1").calculate(df).value
+      result shouldBe Success(0.0)
+    }
+    "fail to compute skewness for non numeric type" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(Skewness("att1").calculate(df).value.isFailure)
+    }
+
+    "compute kurtosis correctly for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      val result = Kurtosis("att1").calculate(df).value
+      result shouldBe Success(-1.2685714285714285)
+    }
+    "fail to compute kurtosis for non numeric type" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(Kurtosis("att1").calculate(df).value.isFailure)
+    }
+
     "compute minimum correctly for numeric data" in withSparkSession { sparkSession =>
       val df = getDfWithNumericValues(sparkSession)
       val result = Minimum("att1").calculate(df)
@@ -551,6 +610,26 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
     "fail to compute maximum for non numeric type" in withSparkSession { sparkSession =>
       val df = getDfFull(sparkSession)
       assert(Maximum("att1").calculate(df).value.isFailure)
+    }
+
+    "compute range correctly for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      val result = Range("att1").calculate(df).value
+      result shouldBe Success(5.0)
+    }
+    "fail to compute range for non numeric type" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(Range("att1").calculate(df).value.isFailure)
+    }
+
+    "compute IQR correctly for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      val result = InterquartileRange("att1").calculate(df).value
+      result shouldBe Success(2.5)
+    }
+    "fail to compute IQR for non numeric type" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(InterquartileRange("att1").calculate(df).value.isFailure)
     }
 
     "compute sum correctly for numeric data" in withSparkSession { session =>
@@ -846,6 +925,86 @@ class AnalyzerTests extends AnyWordSpec with Matchers with SparkContextSpec with
       val analyzer = PatternMatch(someColumnName, Patterns.SOCIAL_SECURITY_NUMBER_US)
       analyzer.calculate(df).value shouldBe Success(2.0 / 8.0)
       assert(analyzer.calculate(df).fullColumn.isDefined)
+    }
+
+    "compute ratio of sums correctly for numeric data" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      RatioOfSums("att1", "att2").calculate(df).value shouldBe Success(21.0 / 18.0)
+    }
+
+    "fail to compute ratio of sums for non numeric type" in withSparkSession { sparkSession =>
+      val df = getDfFull(sparkSession)
+      assert(RatioOfSums("att1", "att2").calculate(df).value.isFailure)
+    }
+
+    "divide by zero" in withSparkSession { sparkSession =>
+      val df = getDfWithNumericValues(sparkSession)
+      val testVal = RatioOfSums("att1", "att2", Some("item IN ('1', '2')")).calculate(df)
+      assert(testVal.value.isSuccess)
+      assert(testVal.value.toOption.get.isInfinite)
+    }
+
+    "return correct columnsReferenced for analyzers without where clauses" in {
+      assert(Completeness("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Mean("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Maximum("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Minimum("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Range("col1").columnsReferenced() === Some(Set("col1")))
+      assert(InterquartileRange("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Sum("col1").columnsReferenced() === Some(Set("col1")))
+      assert(StandardDeviation("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Variance("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Skewness("col1").columnsReferenced() === Some(Set("col1")))
+      assert(Kurtosis("col1").columnsReferenced() === Some(Set("col1")))
+      assert(ApproxCountDistinct("col1").columnsReferenced() === Some(Set("col1")))
+      assert(DataType("col1").columnsReferenced() === Some(Set("col1")))
+      assert(PatternMatch("col1", ".*".r).columnsReferenced() === Some(Set("col1")))
+      assert(MaxLength("col1").columnsReferenced() === Some(Set("col1")))
+      assert(MinLength("col1").columnsReferenced() === Some(Set("col1")))
+      assert(ExactQuantile("col1", 0.5).columnsReferenced() === Some(Set("col1")))
+      assert(ApproxQuantile("col1", 0.5).columnsReferenced() === Some(Set("col1")))
+      assert(ApproxQuantiles("col1", Seq(0.25, 0.75)).columnsReferenced() === Some(Set("col1")))
+      assert(Correlation("col1", "col2").columnsReferenced() === Some(Set("col1", "col2")))
+      assert(RatioOfSums("col1", "col2").columnsReferenced() === Some(Set("col1", "col2")))
+      assert(Size().columnsReferenced() === Some(Set.empty))
+      assert(ZerosCount("col1").columnsReferenced() === Some(Set("col1")))
+      assert(ColumnCount().columnsReferenced() === Some(Set.empty))
+      assert(ColumnExists("col1").columnsReferenced() === Some(Set.empty))
+      assert(KLLSketch("col1").columnsReferenced() === Some(Set("col1")))
+    }
+
+    "return None for columnsReferenced when where clause is present" in {
+      assert(Completeness("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Mean("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Maximum("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Minimum("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Range("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(InterquartileRange("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Sum("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(StandardDeviation("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Variance("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Skewness("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(Kurtosis("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(ApproxCountDistinct("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(DataType("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(PatternMatch("col1", ".*".r, Some("col2 > 0")).columnsReferenced() === None)
+      assert(MaxLength("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(MinLength("col1", Some("col2 > 0")).columnsReferenced() === None)
+      assert(ExactQuantile("col1", 0.5, Some("col2 > 0")).columnsReferenced() === None)
+      assert(ApproxQuantile("col1", 0.5, where = Some("col2 > 0")).columnsReferenced() === None)
+      assert(Correlation("col1", "col2", Some("col1 > 0")).columnsReferenced() === None)
+      assert(RatioOfSums("col1", "col2", Some("col1 > 0")).columnsReferenced() === None)
+      assert(Size(Some("col1 > 0")).columnsReferenced() === None)
+      assert(ZerosCount("col1", Some("col2 > 0")).columnsReferenced() === None)
+    }
+
+    "return None for columnsReferenced for Compliance (free-form SQL)" in {
+      assert(Compliance("test", "col1 > 0").columnsReferenced() === None)
+      assert(Compliance("test", "col1 > 0", columns = List("col1")).columnsReferenced() === None)
+    }
+
+    "return None for columnsReferenced for CustomSql" in {
+      assert(CustomSql("SELECT COUNT(*) FROM table").columnsReferenced() === None)
     }
   }
 }
