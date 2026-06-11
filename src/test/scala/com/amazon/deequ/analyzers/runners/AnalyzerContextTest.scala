@@ -145,6 +145,8 @@ class AnalyzerContextTest extends AnyWordSpec
   }
 
   private[this] def assertSameJson(jsonA: String, jsonB: String): Unit = {
-    assert(SimpleResultSerde.deserialize(jsonA).toSet.sameElements(SimpleResultSerde.deserialize(jsonB).toSet))
+    // Compare as sets: sameElements is order-sensitive, and the JSON element order depends on
+    // Map iteration order, which differs between Scala 2.12 and 2.13.
+    assert(SimpleResultSerde.deserialize(jsonA).toSet == SimpleResultSerde.deserialize(jsonB).toSet)
   }
 }

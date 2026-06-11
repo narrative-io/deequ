@@ -19,7 +19,7 @@ package com.amazon.deequ.suggestions
 import com.amazon.deequ.SparkContextSpec
 import com.amazon.deequ.suggestions.rules.UniqueIfApproximatelyUniqueRule
 import com.amazon.deequ.utils.FixtureSupport
-import com.google.gson.JsonParser
+import com.google.gson.{JsonArray, JsonElement, JsonObject, JsonParser}
 import org.apache.spark.sql.SparkSession
 import org.scalatest.Matchers
 import org.scalatest.WordSpec
@@ -590,7 +590,23 @@ class ConstraintSuggestionResultTest extends WordSpec with Matchers with SparkCo
 
     val parser = new JsonParser()
 
-    assert(parser.parse(jsonA) == parser.parse(jsonB))
+    assert(canonicalize(parser.parse(jsonA)) == canonicalize(parser.parse(jsonB)))
+  }
+
+  // The constraint_suggestions array is produced by iterating a Map, whose order is
+  // collection-implementation-dependent and differs between Scala 2.12 and 2.13. Sort the
+  // array so the comparison asserts on the set of suggestions, not their incidental order.
+  private[this] def canonicalize(json: JsonElement): JsonElement = {
+    if (json.isJsonObject && json.getAsJsonObject.has("constraint_suggestions")) {
+      val arr = json.getAsJsonObject.getAsJsonArray("constraint_suggestions")
+      val sorted = new JsonArray()
+      (0 until arr.size).map(arr.get).sortBy(_.toString).foreach(sorted.add)
+      val result = new JsonObject()
+      result.add("constraint_suggestions", sorted)
+      result
+    } else {
+      json
+    }
   }
 
 }

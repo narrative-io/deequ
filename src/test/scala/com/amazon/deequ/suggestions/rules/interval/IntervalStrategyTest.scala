@@ -20,8 +20,7 @@ import com.amazon.deequ.SparkContextSpec
 import com.amazon.deequ.suggestions.rules.interval.ConfidenceIntervalStrategy.ConfidenceInterval
 import com.amazon.deequ.utils.FixtureSupport
 import org.scalamock.scalatest.MockFactory
-import org.scalatest.Inspectors.forAll
-import org.scalatest.prop.Tables.Table
+import org.scalatest.prop.TableDrivenPropertyChecks._
 import org.scalatest.wordspec.AnyWordSpec
 
 class IntervalStrategyTest extends AnyWordSpec with FixtureSupport with SparkContextSpec
@@ -50,7 +49,7 @@ class IntervalStrategyTest extends AnyWordSpec with FixtureSupport with SparkCon
         (wilsonStrategy, 1.0, 100L, 0.96, 1.0)
       )
 
-      forAll(table) { case (strategy, pHat, numRecords, lowerBound, upperBound) =>
+      forAll(table) { (strategy, pHat, numRecords, lowerBound, upperBound) =>
         val actualInterval = strategy.calculateTargetConfidenceInterval(pHat, numRecords)
         assert(actualInterval == ConfidenceInterval(lowerBound, upperBound))
       }

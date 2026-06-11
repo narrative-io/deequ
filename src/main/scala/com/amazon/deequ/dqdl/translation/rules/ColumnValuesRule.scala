@@ -273,7 +273,7 @@ case class ColumnValuesRule() extends DQDLRuleConverter {
   private def mkDateCheck(check: Check, targetColumn: String, transformedCol: String,
                           condition: DateBasedCondition,
                           rule: DQRule): Either[String, (Check, Seq[DeequMetricMapping])] = {
-    val allOperands = condition.getOperands.asScala
+    val allOperands = condition.getOperands.asScala.toSeq
 
     try {
       val hasNull = allOperands.exists(_.getEvaluatedExpression == null)

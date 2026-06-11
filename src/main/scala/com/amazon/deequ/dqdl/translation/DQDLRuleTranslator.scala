@@ -56,7 +56,7 @@ import software.amazon.glue.dqdl.model.DQRule
 import software.amazon.glue.dqdl.model.DQRuleset
 import software.amazon.glue.dqdl.model.condition.number.NumberBasedCondition
 
-import scala.jdk.CollectionConverters.collectionAsScalaIterableConverter
+import scala.jdk.CollectionConverters._
 
 
 /**

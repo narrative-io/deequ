@@ -9,3 +9,4 @@ target/
 .scalafmt.conf
 *.log
 .attach_pid*
+.flattened-pom.xml

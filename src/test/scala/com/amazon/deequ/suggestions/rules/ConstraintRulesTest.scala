@@ -27,9 +27,8 @@ import com.amazon.deequ.suggestions.rules.interval.WilsonScoreIntervalStrategy
 import com.amazon.deequ.utils.FixtureSupport
 import com.amazon.deequ.{SparkContextSpec, VerificationSuite}
 import org.scalamock.scalatest.MockFactory
-import org.scalatest.Inspectors.forAll
 import org.scalatest.WordSpec
-import org.scalatest.prop.Tables.Table
+import org.scalatest.prop.TableDrivenPropertyChecks._
 
 class ConstraintRulesTest extends WordSpec with FixtureSupport with SparkContextSpec
   with MockFactory{
@@ -152,7 +151,7 @@ class ConstraintRulesTest extends WordSpec with FixtureSupport with SparkContext
     "return evaluable constraint candidates" in
       withSparkSession { session =>
         val table = Table(("strategy", "result"), (WaldIntervalStrategy(), true), (WilsonScoreIntervalStrategy(), true))
-        forAll(table) { case (strategy, result) =>
+        forAll(table) { (strategy, result) =>
           val dfWithColumnCandidate = getDfFull(session)
 
           val fakeColumnProfile = getFakeColumnProfileWithNameAndCompleteness("att1", 0.5)
@@ -181,7 +180,7 @@ class ConstraintRulesTest extends WordSpec with FixtureSupport with SparkContext
           (WaldIntervalStrategy(), 0.5, 0.4, true),
           (WilsonScoreIntervalStrategy(), 0.4, 0.3, true)
         )
-        forAll(table) { case (strategy, colCompleteness, targetCompleteness, result) =>
+        forAll(table) { (strategy, colCompleteness, targetCompleteness, result) =>
 
           val dfWithColumnCandidate = getDfFull(session)
 
@@ -213,7 +212,7 @@ class ConstraintRulesTest extends WordSpec with FixtureSupport with SparkContext
     "return evaluable constraint candidates with custom min/max completeness" in
       withSparkSession { session =>
         val table = Table(("strategy", "result"), (WaldIntervalStrategy(), true), (WilsonScoreIntervalStrategy(), true))
-        forAll(table) { case (strategy, result) =>
+        forAll(table) { (strategy, result) =>
           val dfWithColumnCandidate = getDfFull(session)
 
           val fakeColumnProfile = getFakeColumnProfileWithNameAndCompleteness("att1", 0.5)

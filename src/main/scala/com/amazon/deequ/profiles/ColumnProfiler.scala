@@ -356,8 +356,8 @@ object ColumnProfiler {
         analyzerContextWithAllPreviousResults.foreach { analyzerContextWithAllPreviousResults =>
 
           val relevantEntries = analyzerContextWithAllPreviousResults.metricMap
-            .filterKeys {
-              case histogram: Histogram =>
+            .filter {
+              case (histogram: Histogram, _) =>
                 targetColumnsForHistograms.contains(histogram.column) &&
                   Histogram(histogram.column).equals(histogram)
               case _ => false
