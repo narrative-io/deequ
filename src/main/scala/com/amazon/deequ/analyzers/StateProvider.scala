@@ -16,15 +16,13 @@
 
 package com.amazon.deequ.analyzers
 
-import java.util.concurrent.ConcurrentHashMap
-
-import com.google.common.io.Closeables
-import org.apache.hadoop.fs.{FSDataInputStream, FSDataOutputStream, FileSystem, Path}
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.aggregate.{ApproximatePercentile, DeequHyperLogLogPlusPlusUtils}
 import org.apache.spark.sql.SaveMode
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.catalyst.expressions.aggregate.ApproximatePercentile
+import org.apache.spark.sql.catalyst.expressions.aggregate.DeequHyperLogLogPlusPlusUtils
 
-import scala.jdk.CollectionConverters._
+import java.util.concurrent.ConcurrentHashMap
+import scala.collection.JavaConversions._
 import scala.util.hashing.MurmurHash3
 
 private object StateInformation {
@@ -58,8 +56,7 @@ case class InMemoryStateProvider() extends StateLoader with StatePersister {
 
   override def toString: String = {
     val buffer = new StringBuilder()
-
-    statesByAnalyzer.asScala.foreach { case (analyzer, state) =>
+    statesByAnalyzer.foreach { case (analyzer, state) =>
       buffer.append(analyzer.toString)
       buffer.append(" => ")
       buffer.append(state.toString)
@@ -92,6 +89,9 @@ case class HdfsStateProvider(
       case _: Size =>
         persistLongState(state.asInstanceOf[NumMatches].numMatches, identifier)
 
+      case _: ZerosCount =>
+        persistLongState(state.asInstanceOf[NumMatches].numMatches, identifier)
+
       case _ : Completeness | _ : Compliance | _ : PatternMatch =>
         persistLongLongState(state.asInstanceOf[NumMatchesAndCount], identifier)
 
@@ -107,13 +107,20 @@ case class HdfsStateProvider(
       case _: Maximum =>
         persistDoubleState(state.asInstanceOf[MaxState].maxValue, identifier)
 
+      case _ : Range =>
+        persistRangeState(state.asInstanceOf[RangeState], identifier)
+
+      case _ : InterquartileRange =>
+        persistIQRState(
+          state.asInstanceOf[InterquartileRangeState], identifier)
+
       case _: MaxLength =>
         persistDoubleState(state.asInstanceOf[MaxState].maxValue, identifier)
 
       case _: MinLength =>
         persistDoubleState(state.asInstanceOf[MinState].minValue, identifier)
 
-      case _ : FrequencyBasedAnalyzer | _ : Histogram =>
+      case _ : FrequencyBasedAnalyzer | _ : Histogram | _ : HistogramBinned =>
         persistDataframeLongState(state.asInstanceOf[FrequenciesAndNumRows], identifier)
 
       case _: DataType =>
@@ -131,10 +138,22 @@ case class HdfsStateProvider(
       case _ : StandardDeviation =>
         persistStandardDeviationState(state.asInstanceOf[StandardDeviationState], identifier)
 
+      case _ : Variance =>
+        persistVarianceState(state.asInstanceOf[VarianceState], identifier)
+
+      case _ : Skewness =>
+        persistSkewnessState(state.asInstanceOf[SkewnessState], identifier)
+
+      case _ : Kurtosis =>
+        persistKurtosisState(state.asInstanceOf[KurtosisState], identifier)
+
       case _: ApproxQuantile =>
         val percentileDigest = state.asInstanceOf[ApproxQuantileState].percentileDigest
         val serializedDigest = ApproximatePercentile.serializer.serialize(percentileDigest)
         persistBytes(serializedDigest, identifier)
+
+      case _: ExactQuantile =>
+        persistDoubleState(state.asInstanceOf[ExactQuantileState].exactQuantile, identifier)
 
       case _ =>
         throw new IllegalArgumentException(s"Unable to persist state for analyzer $analyzer.")
@@ -149,6 +168,8 @@ case class HdfsStateProvider(
 
       case _ : Size => NumMatches(loadLongState(identifier))
 
+      case _ : ZerosCount => NumMatches(loadLongState(identifier))
+
       case _ : Completeness | _ : Compliance | _ : PatternMatch => loadLongLongState(identifier)
 
       case _ : Sum => SumState(loadDoubleState(identifier))
@@ -159,11 +180,15 @@ case class HdfsStateProvider(
 
       case _ : Maximum => MaxState(loadDoubleState(identifier))
 
+      case _ : Range => loadRangeState(identifier)
+
+      case _ : InterquartileRange => loadIQRState(identifier)
+
       case _ : MaxLength => MaxState(loadDoubleState(identifier))
 
       case _ : MinLength => MinState(loadDoubleState(identifier))
 
-      case _ : FrequencyBasedAnalyzer | _ : Histogram => loadDataframeLongState(identifier)
+      case _ : FrequencyBasedAnalyzer | _ : Histogram | _ : HistogramBinned => loadDataframeLongState(identifier)
 
       case _ : DataType => DataTypeHistogram.fromBytes(loadBytes(identifier))
 
@@ -174,9 +199,17 @@ case class HdfsStateProvider(
 
       case _ : StandardDeviation => loadStandardDeviationState(identifier)
 
+      case _ : Variance => loadVarianceState(identifier)
+
+      case _ : Skewness => loadSkewnessState(identifier)
+
+      case _ : Kurtosis => loadKurtosisState(identifier)
+
        case _: ApproxQuantile =>
          val percentileDigest = ApproximatePercentile.serializer.deserialize(loadBytes(identifier))
          ApproxQuantileState(percentileDigest)
+
+      case _: ExactQuantile => ExactQuantile(identifier, loadDoubleState(identifier))
 
       case _ =>
         throw new IllegalArgumentException(s"Unable to load state for analyzer $analyzer.")
@@ -185,33 +218,33 @@ case class HdfsStateProvider(
     Option(state.asInstanceOf[S])
   }
 
-  private[this] def persistLongState(state: Long, identifier: String) {
+  private[this] def persistLongState(state: Long, identifier: String): Unit = {
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) {
       _.writeLong(state)
     }
   }
 
-  private[this] def persistDoubleState(state: Double, identifier: String) {
+  private[this] def persistDoubleState(state: Double, identifier: String): Unit = {
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) {
       _.writeDouble(state)
     }
   }
 
-  private[this] def persistLongLongState(state: NumMatchesAndCount, identifier: String) {
+  private[this] def persistLongLongState(state: NumMatchesAndCount, identifier: String): Unit = {
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
       out.writeLong(state.numMatches)
       out.writeLong(state.count)
     }
   }
 
-  private[this] def persistDoubleLongState(state: MeanState, identifier: String) {
+  private[this] def persistDoubleLongState(state: MeanState, identifier: String): Unit = {
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
       out.writeDouble(state.sum)
       out.writeLong(state.count)
     }
   }
 
-  private[this] def persistBytes(bytes: Array[Byte], identifier: String) {
+  private[this] def persistBytes(bytes: Array[Byte], identifier: String): Unit = {
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
       out.writeInt(bytes.length)
       for (index <- bytes.indices) {
@@ -240,7 +273,7 @@ case class HdfsStateProvider(
     }
   }
 
-  private[this] def persistCorrelationState(state: CorrelationState, identifier: String) {
+  private[this] def persistCorrelationState(state: CorrelationState, identifier: String): Unit = {
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
       out.writeDouble(state.n)
       out.writeDouble(state.xAvg)
@@ -253,7 +286,18 @@ case class HdfsStateProvider(
 
   private[this] def persistStandardDeviationState(
       state: StandardDeviationState,
-      identifier: String) {
+      identifier: String): Unit = {
+
+    writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
+      out.writeDouble(state.n)
+      out.writeDouble(state.avg)
+      out.writeDouble(state.m2)
+    }
+  }
+
+  private[this] def persistVarianceState(
+      state: VarianceState,
+      identifier: String): Unit = {
 
     writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
       out.writeDouble(state.n)
@@ -308,6 +352,84 @@ case class HdfsStateProvider(
   private[this] def loadStandardDeviationState(identifier: String): StandardDeviationState = {
     readFromFileOnDfs(session, s"$locationPrefix-$identifier.bin") { in =>
       StandardDeviationState(in.readDouble(), in.readDouble(), in.readDouble())
+    }
+  }
+
+  private[this] def loadVarianceState(identifier: String): VarianceState = {
+    readFromFileOnDfs(session, s"$locationPrefix-$identifier.bin") { in =>
+      VarianceState(in.readDouble(), in.readDouble(), in.readDouble())
+    }
+  }
+
+  private[this] def persistSkewnessState(
+      state: SkewnessState,
+      identifier: String): Unit = {
+
+    writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
+      out.writeDouble(state.n)
+      out.writeDouble(state.avg)
+      out.writeDouble(state.m2)
+      out.writeDouble(state.m3)
+    }
+  }
+
+  private[this] def loadSkewnessState(identifier: String): SkewnessState = {
+    readFromFileOnDfs(session, s"$locationPrefix-$identifier.bin") { in =>
+      SkewnessState(in.readDouble(), in.readDouble(),
+        in.readDouble(), in.readDouble())
+    }
+  }
+
+  private[this] def persistKurtosisState(
+      state: KurtosisState,
+      identifier: String): Unit = {
+
+    writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
+      out.writeDouble(state.n)
+      out.writeDouble(state.avg)
+      out.writeDouble(state.m2)
+      out.writeDouble(state.m3)
+      out.writeDouble(state.m4)
+    }
+  }
+
+  private[this] def loadKurtosisState(identifier: String): KurtosisState = {
+    readFromFileOnDfs(session, s"$locationPrefix-$identifier.bin") { in =>
+      KurtosisState(in.readDouble(), in.readDouble(),
+        in.readDouble(), in.readDouble(), in.readDouble())
+    }
+  }
+
+  private[this] def persistRangeState(
+      state: RangeState,
+      identifier: String): Unit = {
+
+    writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
+      out.writeDouble(state.minValue)
+      out.writeDouble(state.maxValue)
+    }
+  }
+
+  private[this] def loadRangeState(identifier: String): RangeState = {
+    readFromFileOnDfs(session, s"$locationPrefix-$identifier.bin") { in =>
+      RangeState(in.readDouble(), in.readDouble())
+    }
+  }
+
+  private[this] def persistIQRState(
+      state: InterquartileRangeState,
+      identifier: String): Unit = {
+
+    writeToFileOnDfs(session, s"$locationPrefix-$identifier.bin", allowOverwrite) { out =>
+      out.writeDouble(state.q1)
+      out.writeDouble(state.q3)
+    }
+  }
+
+  private[this] def loadIQRState(
+      identifier: String): InterquartileRangeState = {
+    readFromFileOnDfs(session, s"$locationPrefix-$identifier.bin") { in =>
+      InterquartileRangeState(in.readDouble(), in.readDouble())
     }
   }
 }

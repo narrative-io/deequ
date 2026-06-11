@@ -21,6 +21,7 @@ import org.apache.spark.sql.{Column, Row}
 import org.apache.spark.sql.functions._
 import Analyzers._
 import com.amazon.deequ.analyzers.Preconditions.hasColumn
+import com.amazon.deequ.metrics.DoubleMetric
 import com.google.common.annotations.VisibleForTesting
 
 /**
@@ -40,31 +41,54 @@ import com.google.common.annotations.VisibleForTesting
 case class Compliance(instance: String,
                       predicate: String,
                       where: Option[String] = None,
-                      columns: List[String] = List.empty[String])
-  extends StandardScanShareableAnalyzer[NumMatchesAndCount]("Compliance", instance)
-  with FilterableAnalyzer {
+                      columns: List[String] = List.empty[String],
+                      analyzerOptions: Option[AnalyzerOptions] = None)
+  extends StandardScanShareableAnalyzer[NumMatchesAndCount]("Compliance", instance) with FilterableAnalyzer {
 
   override def fromAggregationResult(result: Row, offset: Int): Option[NumMatchesAndCount] = {
-
     ifNoNullsIn(result, offset, howMany = 2) { _ =>
-      NumMatchesAndCount(result.getLong(offset), result.getLong(offset + 1), Some(criterion))
+      NumMatchesAndCount(result.getLong(offset), result.getLong(offset + 1), Some(rowLevelResults))
+    }
+  }
+
+  // When WHERE clause filters all rows, sum(criterion) returns null (criterion is null for
+  // non-matching rows), so fromAggregationResult returns None. We still need the fullColumn
+  // (rowLevelResults) for correct row-level results.
+  override def computeMetricFrom(state: Option[NumMatchesAndCount]): DoubleMetric = {
+    state match {
+      case None if where.isDefined =>
+        metricFromEmptyWithColumn(this, "Compliance", instance, rowLevelResults)
+      case _ => super.computeMetricFrom(state)
     }
   }
 
   override def aggregationFunctions(): Seq[Column] = {
-
-    val summation = sum(criterion)
-
+    val summation = sum(criterion.cast(IntegerType))
     summation :: conditionalCount(where) :: Nil
   }
 
   override def filterCondition: Option[String] = where
 
   @VisibleForTesting
-  private def criterion: Column = {
-    conditionalSelection(expr(predicate), where).cast(IntegerType)
+  private def criterion: Column = conditionalSelection(expr(predicate), where)
+
+  private def rowLevelResults: Column = {
+    val filteredRowOutcome = getRowLevelFilterTreatment(analyzerOptions)
+    val whereNotCondition = where.map { expression => not(expr(expression)) || expr(expression).isNull }
+
+    filteredRowOutcome match {
+      case FilteredRowOutcome.TRUE =>
+        conditionSelectionGivenColumn(expr(predicate), whereNotCondition, replaceWith = true)
+      case _ =>
+        // The default behavior when using filtering for rows is to treat them as nulls. No special treatment needed.
+        criterion
+    }
   }
 
   override protected def additionalPreconditions(): Seq[StructType => Unit] =
     columns.map(hasColumn)
+
+  // Compliance uses free-form SQL predicates that can reference arbitrary columns,
+  // so we cannot safely determine which columns are needed.
+  override def columnsReferenced(): Option[Set[String]] = None
 }

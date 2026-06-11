@@ -17,22 +17,43 @@
 package com.amazon.deequ.analyzers
 
 import com.amazon.deequ.analyzers.Preconditions.{hasColumn, isNotNested}
+import com.amazon.deequ.metrics.DoubleMetric
 import org.apache.spark.sql.functions.sum
 import org.apache.spark.sql.types.{IntegerType, StructType}
 import Analyzers._
 import com.google.common.annotations.VisibleForTesting
-import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.expr
 import org.apache.spark.sql.{Column, Row}
 
 /** Completeness is the fraction of non-null values in a column of a DataFrame. */
-case class Completeness(column: String, where: Option[String] = None) extends
+case class Completeness(column: String, where: Option[String] = None,
+                        analyzerOptions: Option[AnalyzerOptions] = None) extends
   StandardScanShareableAnalyzer[NumMatchesAndCount]("Completeness", column) with
   FilterableAnalyzer {
 
   override def fromAggregationResult(result: Row, offset: Int): Option[NumMatchesAndCount] = {
-
     ifNoNullsIn(result, offset, howMany = 2) { _ =>
-      NumMatchesAndCount(result.getLong(offset), result.getLong(offset + 1), Some(criterion))
+      NumMatchesAndCount(result.getLong(offset), result.getLong(offset + 1), Some(rowLevelResults))
+    }
+  }
+
+  // When WHERE clause filters all rows, sum returns 0 and count returns 0, so state is
+  // Some(NumMatchesAndCount(0, 0)). Detection differs from Compliance/Min/Max (which get None)
+  // because .isNotNull in criterion converts null to false (0), preventing null propagation
+  // through sum(). We detect this via count=0 and return a Failure metric with fullColumn
+  // so row-level results correctly label filtered rows.
+  //
+  // Behavior change: previously this case produced Success(NaN) (0/0), which appeared in
+  // successMetricsAsDataFrame/Json. Now it produces a Failure metric, so it will be excluded
+  // from success metrics. This is consistent with how Min/Max/Compliance already behave
+  // (they return Failure when all rows are filtered) and avoids NaN propagating into
+  // dashboards or anomaly detection.
+  override def computeMetricFrom(state: Option[NumMatchesAndCount]): DoubleMetric = {
+    state match {
+      case Some(NumMatchesAndCount(_, 0, _)) if where.isDefined =>
+        metricFromEmptyWithColumn(this, "Completeness", column, rowLevelResults)
+      case _ => super.computeMetricFrom(state)
     }
   }
 
@@ -49,6 +70,15 @@ case class Completeness(column: String, where: Option[String] = None) extends
 
   override def filterCondition: Option[String] = where
 
+  override def columnsReferenced(): Option[Set[String]] =
+    if (where.isDefined) None else Some(Set(column))
+
   @VisibleForTesting // required by some tests that compare analyzer results to an expected state
   private[deequ] def criterion: Column = conditionalSelection(column, where).isNotNull
+
+  private[deequ] def rowLevelResults: Column = {
+    val whereCondition = where.map { expression => expr(expression)}
+    conditionalSelectionFilteredFromColumns(
+      col(column).isNotNull, whereCondition, getRowLevelFilterTreatment(analyzerOptions))
+  }
 }

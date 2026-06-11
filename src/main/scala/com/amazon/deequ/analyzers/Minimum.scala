@@ -16,13 +16,19 @@
 
 package com.amazon.deequ.analyzers
 
-import com.amazon.deequ.analyzers.Preconditions.{hasColumn, isNumeric}
-import org.apache.spark.sql.{Column, Row}
-import org.apache.spark.sql.functions.{col, min}
-import org.apache.spark.sql.types.{DoubleType, StructType}
-import Analyzers._
+import com.amazon.deequ.analyzers.Analyzers._
+import com.amazon.deequ.analyzers.Preconditions.hasColumn
+import com.amazon.deequ.analyzers.Preconditions.isNumeric
+import com.amazon.deequ.metrics.DoubleMetric
 import com.amazon.deequ.metrics.FullColumn
 import com.google.common.annotations.VisibleForTesting
+import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.element_at
+import org.apache.spark.sql.functions.min
+import org.apache.spark.sql.types.DoubleType
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.Column
+import org.apache.spark.sql.Row
 
 case class MinState(minValue: Double, override val fullColumn: Option[Column] = None)
   extends DoubleValuedState[MinState] with FullColumn {
@@ -36,18 +42,33 @@ case class MinState(minValue: Double, override val fullColumn: Option[Column] = 
   }
 }
 
-case class Minimum(column: String, where: Option[String] = None)
+case class Minimum(column: String, where: Option[String] = None, analyzerOptions: Option[AnalyzerOptions] = None)
   extends StandardScanShareableAnalyzer[MinState]("Minimum", column)
   with FilterableAnalyzer {
 
   override def aggregationFunctions(): Seq[Column] = {
-    min(criterion) :: Nil
+    // The criterion returns a column where each row contains an array of 2 elements.
+    // The first element of the array is a string that indicates if the row is "in scope" or "filtered" out.
+    // The second element is the value used for calculating the metric. We use "element_at" to extract it.
+    min(element_at(criterion, 2).cast(DoubleType)) :: Nil
   }
 
   override def fromAggregationResult(result: Row, offset: Int): Option[MinState] = {
-
     ifNoNullsIn(result, offset) { _ =>
       MinState(result.getDouble(offset), Some(criterion))
+    }
+  }
+
+  // When WHERE clause filters all rows, min(null) returns null, so fromAggregationResult
+  // returns None. We still need the fullColumn (criterion) for correct row-level results.
+  // Note: criterion is the raw augmented column ["FilteredData", null]. The FilteredRowOutcome
+  // treatment (TRUE vs NULL) is applied downstream by the assertion UDF in
+  // RowLevelAssertedConstraint, unlike Completeness/Compliance which bake it into rowLevelResults.
+  override def computeMetricFrom(state: Option[MinState]): DoubleMetric = {
+    state match {
+      case None if where.isDefined =>
+        metricFromEmptyWithColumn(this, "Minimum", column, criterion)
+      case _ => super.computeMetricFrom(state)
     }
   }
 
@@ -57,6 +78,9 @@ case class Minimum(column: String, where: Option[String] = None)
 
   override def filterCondition: Option[String] = where
 
+  override def columnsReferenced(): Option[Set[String]] =
+    if (where.isDefined) None else Some(Set(column))
+
   @VisibleForTesting
-  private def criterion: Column = conditionalSelection(column, where).cast(DoubleType)
+  private def criterion: Column = conditionalSelectionWithAugmentedOutcome(col(column), where)
 }
